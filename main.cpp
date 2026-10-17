@@ -1,12 +1,12 @@
 #include "our_gl.h"
 #include "model.h"
+#include "ssao.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <numbers>
-#include <random>
 #include <string>
 
 extern mat<4,4> ModelView, Perspective, Viewport, LightView, LightProjection;
@@ -48,10 +48,11 @@ struct BlankShader : IShader {
         return transform * model.vert(face, vert);
     }
 
-    virtual std::pair<bool, TGAColor> fragment(const vec3 bar, const vec3, const vec3) const {
+    virtual FragmentOutput fragment(const vec3 bar, const vec3, const vec3) const {
         vec2 uv = varying_uv[0]*bar[0] + varying_uv[1]*bar[1] + varying_uv[2]*bar[2];
         // Only fully opaque texels cast shadows in this first version.
-        return {false, {255, 255, 255, static_cast<std::uint8_t>(model.diffuse(uv, {}, {}, filter).w*255.)}};
+        const auto alpha = static_cast<std::uint8_t>(model.diffuse(uv, {}, {}, filter).w*255.);
+        return {false, {255, 255, 255, alpha}, {0, 0, 0, alpha}};
     }
 };
 
@@ -89,9 +90,8 @@ struct PhongShader : IShader {
         return Perspective * gl_Position;                         // in clip coordinates
     }
 
-    virtual std::pair<bool,TGAColor> fragment(const vec3 bar, const vec3 dbar_dx,
-                                               const vec3 dbar_dy) const {
-        TGAColor gl_FragColor = {255, 255, 255, 255};             // output color of the fragment
+    virtual FragmentOutput fragment(const vec3 bar, const vec3 dbar_dx,
+                                    const vec3 dbar_dy) const {
         vec2 uv = varying_uv[0] * bar[0] + varying_uv[1] * bar[1] + varying_uv[2] * bar[2];
         vec2 uv_dx = varying_uv[0] * dbar_dx[0] + varying_uv[1] * dbar_dx[1] + varying_uv[2] * dbar_dx[2];
         vec2 uv_dy = varying_uv[0] * dbar_dy[0] + varying_uv[1] * dbar_dy[1] + varying_uv[2] * dbar_dy[2];
@@ -152,11 +152,14 @@ struct PhongShader : IShader {
             spec *= visibility;
         }
 
+        const auto alpha = static_cast<std::uint8_t>(basecolor.w * 255.);
+        TGAColor direct_color = {0, 0, 0, alpha};
+        TGAColor ambient_color = {0, 0, 0, alpha};
         for (int channel : {0,1,2}) {
-            gl_FragColor[channel] *= std::min(1., basecolor[2 - channel]*(ambient + diff) + spec);
+            direct_color[channel] = static_cast<std::uint8_t>(255.*std::min(1., basecolor[2-channel]*diff + spec));
+            ambient_color[channel] = static_cast<std::uint8_t>(255.*basecolor[2-channel]*ambient);
         }
-        gl_FragColor[3] = static_cast<std::uint8_t>(basecolor.w * 255.);
-        return {false, gl_FragColor};                             // do not discard the pixel
+        return {false, direct_color, ambient_color};
     }
 };
 
@@ -359,47 +362,33 @@ int main(int argc, char** argv) {
     }
 
     blend_transparency(target);
-    target.resolve(framebuffer, zbuffer);
+    TGAImage ambient_image(width, height, TGAImage::RGB);
+    target.resolve(framebuffer, zbuffer, &ambient_image);
     const auto camera_done = Clock::now();
 
-    // Screen-space ambient occlusion from the camera depth buffer.
-    constexpr double ao_radius = .1;
-    constexpr int ao_samples = 128;
-    const double ao_radius_x = Viewport[0][0]*ao_radius;
-    const double ao_radius_y = Viewport[1][1]*ao_radius;
+    // Estimate view-space occlusion from opaque depth, then modulate ambient light only.
+    constexpr double ao_radius = .4;
+    constexpr int ao_samples = 32;
+    const std::vector<double> visibility = compute_ssao(zbuffer, width, height, Perspective,
+                                                         Viewport, ao_radius, ao_samples);
     TGAImage ao_image(width, height, TGAImage::GRAYSCALE);
 #ifdef _OPENMP
     #pragma omp parallel for
 #endif
     for (int y=0; y<height; y++) {
         for (int x=0; x<width; x++) {
-            const double z = zbuffer[x+y*width];
-            if (z <= -999.) continue;
-            std::uint32_t seed = 42u + static_cast<std::uint32_t>(x+y*width);
-            seed ^= seed >> 16;
-            seed *= 0x7feb352du;
-            seed ^= seed >> 15;
-            seed *= 0x846ca68bu;
-            seed ^= seed >> 16;
-            std::minstd_rand rng(seed);
-            std::uniform_real_distribution<double> offset(-1., 1.);
-            int occluded = 0, valid = 0;
-            for (int i=0; i<ao_samples; i++) {
-                double px = x + ao_radius_x*offset(rng);
-                double py = y + ao_radius_y*offset(rng);
-                double pz = z + ao_radius*offset(rng);
-                if (px < 0 || px >= width || py < 0 || py >= height) continue;
-                const double d = zbuffer[static_cast<int>(px) + static_cast<int>(py)*width];
-                if (z + 5.*ao_radius < d) continue; // avoid halos at depth discontinuities
-                valid++;
-                occluded += d > pz;
+            const int index = x+y*width;
+            const bool has_opaque_depth = zbuffer[index] > -999.;
+            const double factor = has_opaque_depth ? visibility[index] : 1.;
+            if (has_opaque_depth) {
+                const std::uint8_t gray = static_cast<std::uint8_t>(factor*255.);
+                ao_image.set(x, y, {gray, gray, gray, 255});
             }
-            const double visibility = valid ? 1. - .4*occluded/valid : 1.;
-            const double factor = visibility*visibility*(3. - 2.*visibility); // smoothstep(0, 1, visibility)
-            const std::uint8_t gray = static_cast<std::uint8_t>(factor*255.);
-            ao_image.set(x, y, {gray, gray, gray, 255});
             TGAColor color = framebuffer.get(x, y);
-            for (int channel : {0,1,2}) color[channel] = static_cast<std::uint8_t>(color[channel]*factor);
+            const TGAColor ambient = ambient_image.get(x, y);
+            for (int channel : {0,1,2})
+                color[channel] = static_cast<std::uint8_t>(std::min(255.,
+                    color[channel] + ambient[channel]*factor));
             framebuffer.set(x, y, color);
         }
     }

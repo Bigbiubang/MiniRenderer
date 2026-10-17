@@ -63,31 +63,38 @@ void rasterize_shadow(const Triangle &clip, const IShader &shader, const mat<4,4
             double z = bar * vec3{projected[0].z, projected[1].z, projected[2].z};
             double &depth = depth_buffer[x+y*width];
             if (z <= depth) continue;
-            auto [discard, color] = shader.fragment(bar, {}, {});
-            if (!discard && color[3] == 255) depth = z;
+            const FragmentOutput fragment = shader.fragment(bar, {}, {});
+            if (!fragment.discard && fragment.direct[3] == 255) depth = z;
         }
     }
 }
 
 RenderTarget::RenderTarget(int w, int h, int count)
     : width(w), height(h), samples(count), depth(w*h*count, -1000.),
-      color(w*h*count, TGAColor{0, 0, 0, 255}), transparent(w*h*count) {}
+      color(w*h*count, TGAColor{0, 0, 0, 255}),
+      ambient(w*h*count, TGAColor{0, 0, 0, 255}), transparent(w*h*count) {}
 
-void RenderTarget::resolve(TGAImage &framebuffer, std::vector<double> &pixel_depth) const {
+void RenderTarget::resolve(TGAImage &framebuffer, std::vector<double> &pixel_depth,
+                           TGAImage *ambient_image) const {
     pixel_depth.assign(width*height, -1000.);
     for (int y=0; y<height; y++) {
         for (int x=0; x<width; x++) {
             const int pixel = x+y*width;
             TGAColor resolved = {0, 0, 0, 255};
+            TGAColor resolved_ambient = {0, 0, 0, 255};
             for (int channel : {0,1,2}) {
-                int total = 0;
-                for (int sample=0; sample<samples; sample++)
+                int total = 0, ambient_total = 0;
+                for (int sample=0; sample<samples; sample++) {
                     total += color[pixel*samples+sample][channel];
+                    ambient_total += ambient[pixel*samples+sample][channel];
+                }
                 resolved[channel] = static_cast<std::uint8_t>((total+samples/2)/samples);
+                resolved_ambient[channel] = static_cast<std::uint8_t>((ambient_total+samples/2)/samples);
             }
             for (int sample=0; sample<samples; sample++)
                 pixel_depth[pixel] = std::max(pixel_depth[pixel], depth[pixel*samples+sample]);
             framebuffer.set(x, y, resolved);
+            if (ambient_image) ambient_image->set(x, y, resolved_ambient);
         }
     }
 }
@@ -190,18 +197,20 @@ void rasterize(const Triangle &clip, const IShader &shader, RenderTarget &target
                     }
                 }
                 if (!visible_count) continue;
-                auto [discard, frag_color] = shader.fragment(shade_bar, shade_dx, shade_dy);
-                if (discard) continue;
-                if (pass == RenderPass::Opaque && frag_color[3] != 255) continue;
-                if (pass == RenderPass::Transparent && (frag_color[3] == 0 || frag_color[3] == 255)) continue;
+                const FragmentOutput fragment = shader.fragment(shade_bar, shade_dx, shade_dy);
+                if (fragment.discard) continue;
+                if (pass == RenderPass::Opaque && fragment.direct[3] != 255) continue;
+                if (pass == RenderPass::Transparent &&
+                    (fragment.direct[3] == 0 || fragment.direct[3] == 255)) continue;
                 for (int sample=0; sample<target.samples; sample++) {
                     if (!visible[sample]) continue;
                     const int index = (x+y*target.width)*target.samples+sample;
                     if (pass == RenderPass::Opaque) {
                         target.depth[index] = depths[sample];
-                        target.color[index] = frag_color;
+                        target.color[index] = fragment.direct;
+                        target.ambient[index] = fragment.ambient;
                     } else {
-                        target.transparent[index].push_back({depths[sample], frag_color});
+                        target.transparent[index].push_back({depths[sample], fragment.direct, fragment.ambient});
                     }
                 }
             }
@@ -216,10 +225,13 @@ void blend_transparency(RenderTarget &target) {
         std::sort(fragments.begin(), fragments.end(),
                   [](const auto &a, const auto &b) { return a.z < b.z; });
         TGAColor &background = target.color[index];
+        TGAColor &ambient = target.ambient[index];
         for (const auto &fragment : fragments) {
-            int alpha = fragment.color[3];
-            for (int channel : {0,1,2})
-                background[channel] = (fragment.color[channel]*alpha + background[channel]*(255-alpha)) / 255;
+            int alpha = fragment.direct[3];
+            for (int channel : {0,1,2}) {
+                background[channel] = (fragment.direct[channel]*alpha + background[channel]*(255-alpha)) / 255;
+                ambient[channel] = (fragment.ambient[channel]*alpha + ambient[channel]*(255-alpha)) / 255;
+            }
         }
     }
 }

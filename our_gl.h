@@ -11,29 +11,38 @@ void init_viewport (const int x, const int y, const int w, const int h);
 void init_zbuffer (const int x, const int y);
 void init_sbuffer(const int x, const int y);
 
+struct FragmentOutput {
+    bool discard;
+    TGAColor direct;
+    TGAColor ambient;
+};
+
 struct IShader {
     static TGAColor sample2D(const TGAImage &img, const vec2 &uvf) {
         return img.get(uvf[0] * img.width(), uvf[1] * img.height());
     }
-    virtual std::pair<bool,TGAColor> fragment(const vec3 bar, const vec3 dbar_dx,
-                                               const vec3 dbar_dy) const = 0;
+    virtual FragmentOutput fragment(const vec3 bar, const vec3 dbar_dx,
+                                    const vec3 dbar_dy) const = 0;
 };
 
 typedef vec4 Triangle[3]; // a triangle primitive is made of three ordered points
 enum class RenderPass { Opaque, Transparent };
 struct TransparentFragment {
     double z;
-    TGAColor color;
+    TGAColor direct;
+    TGAColor ambient;
 };
 using TransparentBuffer = std::vector<std::vector<TransparentFragment>>;
 struct RenderTarget {
     int width, height, samples;
     std::vector<double> depth;
     std::vector<TGAColor> color;
+    std::vector<TGAColor> ambient;
     TransparentBuffer transparent;
 
     RenderTarget(int width, int height, int samples);
-    void resolve(TGAImage &framebuffer, std::vector<double> &pixel_depth) const;
+    void resolve(TGAImage &framebuffer, std::vector<double> &pixel_depth,
+                 TGAImage *ambient_image = nullptr) const;
 };
 void rasterize(const Triangle &clip, const IShader &shader, RenderTarget &target, RenderPass pass,
                int y_begin, int y_end);

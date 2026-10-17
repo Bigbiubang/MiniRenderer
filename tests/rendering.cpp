@@ -1,23 +1,60 @@
 #include "our_gl.h"
+#include "ssao.h"
 #include "texture.h"
 #include <iostream>
 
 struct FlatShader : IShader {
     TGAColor color;
     explicit FlatShader(TGAColor value) : color(value) {}
-    std::pair<bool, TGAColor> fragment(const vec3, const vec3, const vec3) const override { return {false, color}; }
+    FragmentOutput fragment(const vec3, const vec3, const vec3) const override {
+        return {false, color, {0, 0, 0, color[3]}};
+    }
 };
 
 struct TextureShader : IShader {
     const Texture2D &texture;
     explicit TextureShader(const Texture2D &value) : texture(value) {}
-    std::pair<bool, TGAColor> fragment(const vec3 bar, const vec3 dx, const vec3 dy) const override {
+    FragmentOutput fragment(const vec3 bar, const vec3 dx, const vec3 dy) const override {
         const vec2 uv{bar.y, bar.z};
         const vec2 uv_dx{dx.y, dx.z}, uv_dy{dy.y, dy.z};
         const auto gray = static_cast<std::uint8_t>(std::round(texture.sample(uv, uv_dx, uv_dy).x*255.));
-        return {false, {gray, gray, gray, 255}};
+        return {false, {gray, gray, gray, 255}, {0, 0, 0, 255}};
     }
 };
+
+struct SplitShader : IShader {
+    FragmentOutput fragment(const vec3, const vec3, const vec3) const override {
+        return {false, {0, 0, 100, 255}, {0, 80, 0, 255}};
+    }
+};
+
+bool test_ambient_and_ssao() {
+    extern mat<4,4> Perspective, Viewport;
+    constexpr int size = 32;
+    init_perspective(2., 90., 1., .1, 10.);
+    init_viewport(0, 0, size, size);
+    const vec4 plane = Perspective*vec4{0, 0, 0, 1};
+    std::vector<double> depth(size*size, plane.z/plane.w);
+    const std::vector<double> visibility = compute_ssao(depth, size, size, Perspective, Viewport, .5, 32);
+    if (visibility[16+16*size] < .98) return false;
+    const vec4 raised = Perspective*vec4{0, 0, .35, 1};
+    for (int y=14; y<=18; y++)
+        for (int x=14; x<=18; x++) depth[x+y*size] = raised.z/raised.w;
+    const std::vector<double> with_occluder = compute_ssao(depth, size, size, Perspective, Viewport, .5, 32);
+    double darkest = 1.;
+    for (int y=11; y<=21; y++)
+        for (int x=11; x<=21; x++) darkest = std::min(darkest, with_occluder[x+y*size]);
+    if (darkest > .95) return false;
+
+    Triangle triangle = {{-.5, -.5, 0, 1}, {.5, -.5, 0, 1}, {0, .5, 0, 1}};
+    SplitShader shader;
+    RenderTarget target(size, size, 1);
+    rasterize(triangle, shader, target, RenderPass::Opaque, 0, size);
+    TGAImage direct(size, size, TGAImage::RGB), ambient(size, size, TGAImage::RGB);
+    target.resolve(direct, depth, &ambient);
+    return direct.get(16, 16)[2] == 100 && direct.get(16, 16)[1] == 0 &&
+           ambient.get(16, 16)[2] == 0 && ambient.get(16, 16)[1] == 80;
+}
 
 bool test_texture_filtering() {
     TGAImage colors(2, 2, TGAImage::RGB);
@@ -192,6 +229,10 @@ bool test_msaa_coverage() {
 }
 
 int main() {
+    if (!test_ambient_and_ssao()) {
+        std::cerr << "SSAO must leave a flat surface clear and keep ambient separate\n";
+        return 1;
+    }
     if (!test_texture_filtering()) {
         std::cerr << "Texture filtering must blend texels and choose mip levels\n";
         return 1;
