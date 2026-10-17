@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <numbers>
 #include <random>
 #include <string>
 
@@ -161,34 +162,98 @@ struct DrawCommand {
 int main(int argc, char** argv) {
     int msaa_samples = 1;
     bool timings = false;
+    int width = 800, height = 800;
+    vec3 eye{-1, 0, 2}, center{0, 0, 0}, up{0, 1, 0};
+    double fov = 2.*std::atan(1./norm(eye-center))*180./std::numbers::pi;
+    double near_plane = .1, far_plane = 100.;
     std::vector<std::string> paths;
+    auto parse_double = [&](int &i, double &value) {
+        if (++i >= argc) return false;
+        try {
+            size_t used = 0;
+            const std::string token = argv[i];
+            value = std::stod(token, &used);
+            return used == token.size() && std::isfinite(value);
+        } catch (const std::exception &) {
+            return false;
+        }
+    };
+    auto parse_int = [&](int &i, int &value) {
+        if (++i >= argc) return false;
+        try {
+            size_t used = 0;
+            const std::string token = argv[i];
+            value = std::stoi(token, &used);
+            return used == token.size();
+        } catch (const std::exception &) {
+            return false;
+        }
+    };
+    auto parse_vec3 = [&](int &i, vec3 &value) {
+        for (int axis=0; axis<3; axis++)
+            if (!parse_double(i, value[axis])) return false;
+        return true;
+    };
+    auto usage = [&] {
+        std::cerr << "Usage: " << argv[0]
+                  << " [--msaa 1|4] [--timings] [--size width height]"
+                  << " [--eye x y z] [--center x y z] [--up x y z]"
+                  << " [--fov degrees] [--near distance] [--far distance]"
+                  << " obj/model.obj [obj/other.obj ...]\n";
+    };
     for (int i=1; i<argc; i++) {
-        if (std::string(argv[i]) == "--msaa") {
+        const std::string arg = argv[i];
+        if (arg == "--msaa") {
             if (++i >= argc || (std::string(argv[i]) != "1" && std::string(argv[i]) != "4")) {
                 std::cerr << "--msaa expects 1 or 4\n";
                 return 1;
             }
             msaa_samples = argv[i][0]-'0';
-        } else if (std::string(argv[i]) == "--timings") {
+        } else if (arg == "--timings") {
             timings = true;
+        } else if (arg == "--size") {
+            if (!parse_int(i, width) || !parse_int(i, height)) {
+                std::cerr << "--size expects width and height\n";
+                return 1;
+            }
+        } else if (arg == "--eye" || arg == "--center" || arg == "--up") {
+            vec3 &value = arg == "--eye" ? eye : arg == "--center" ? center : up;
+            if (!parse_vec3(i, value)) {
+                std::cerr << arg << " expects three numbers\n";
+                return 1;
+            }
+        } else if (arg == "--fov" || arg == "--near" || arg == "--far") {
+            double &value = arg == "--fov" ? fov : arg == "--near" ? near_plane : far_plane;
+            if (!parse_double(i, value)) {
+                std::cerr << arg << " expects a number\n";
+                return 1;
+            }
+        } else if (arg == "--help") {
+            usage();
+            return 0;
+        } else if (arg.starts_with("--")) {
+            std::cerr << "Unknown option: " << arg << '\n';
+            usage();
+            return 1;
         } else {
-            paths.emplace_back(argv[i]);
+            paths.emplace_back(arg);
         }
     }
     if (paths.empty()) {
-        std::cerr << "Usage: " << argv[0] << " [--msaa 1|4] [--timings] obj/model.obj [obj/other.obj ...]" << std::endl;
+        usage();
+        return 1;
+    }
+    if (width < 1 || height < 1 || width > 4096 || height > 4096 ||
+        fov <= 0 || fov >= 180 || near_plane <= 0 || far_plane <= near_plane ||
+        norm(eye-center) < 1e-6 || norm(cross(up, eye-center)) < 1e-6) {
+        std::cerr << "Invalid camera or image settings\n";
         return 1;
     }
 
     using Clock = std::chrono::steady_clock;
     const auto start = Clock::now();
 
-    constexpr int width  = 800;      // output image size
-    constexpr int height = 800;
     constexpr vec3  light{ 1, 1, 1}; // direction toward the light
-    constexpr vec3    eye{-1, 0, 2}; // camera position
-    constexpr vec3 center{ 0, 0, 0}; // camera direction
-    constexpr vec3     up{ 0, 1, 0}; // camera up vector
     constexpr int shadow_width = 1024, shadow_height = 1024;
 
     std::vector<Model> models;
@@ -204,7 +269,7 @@ int main(int argc, char** argv) {
     const auto loaded = Clock::now();
 
     // Pass 1: fit an orthographic light projection around all model vertices.
-    LightView = make_lookat(center + normalized(light), center, up);
+    LightView = make_lookat(center + normalized(light), center, {0, 1, 0});
     LightProjection = fit_orthographic(models, LightView);
     mat<4,4> light_viewport = {{{shadow_width/2.,0,0,shadow_width/2.},
                                {0,shadow_height/2.,0,shadow_height/2.},
@@ -221,8 +286,11 @@ int main(int argc, char** argv) {
 
     // Pass 2: render from the camera, testing each fragment against sbuffer.
     lookat(eye, center, up);                                   // build the ModelView   matrix
-    init_perspective(norm(eye-center));                        // build the Perspective matrix
-    init_viewport(width/16, height/16, width*7/8, height*7/8); // build the Viewport    matrix
+    const int viewport_x = width/16, viewport_y = height/16;
+    const int viewport_width = width-2*viewport_x, viewport_height = height-2*viewport_y;
+    init_perspective(norm(eye-center), fov, static_cast<double>(viewport_width)/viewport_height,
+                     near_plane, far_plane);                    // build the Perspective matrix
+    init_viewport(viewport_x, viewport_y, viewport_width, viewport_height);
 
     TGAImage framebuffer(width, height, TGAImage::RGB);
     RenderTarget target(width, height, msaa_samples);
@@ -238,7 +306,7 @@ int main(int argc, char** argv) {
 
     // Bin triangles once, preserving draw order within each band.
     constexpr int band_height = 64;
-    constexpr int band_count = (height+band_height-1)/band_height;
+    const int band_count = (height+band_height-1)/band_height;
     std::vector<std::vector<int>> band_commands(band_count);
     for (size_t i=0; i<commands.size(); i++) {
         double min_y = height, max_y = -1.;

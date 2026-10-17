@@ -5,7 +5,8 @@
 
 mat<4,4> make_lookat(const vec3 eye, const vec3 center, const vec3 up);
 void lookat(const vec3 eye, const vec3 center, const vec3 up);
-void init_perspective (const double f);
+void init_perspective(double camera_distance, double fov_degrees, double aspect,
+                      double near_plane, double far_plane);
 void init_viewport (const int x, const int y, const int w, const int h);
 void init_zbuffer (const int x, const int y);
 void init_sbuffer(const int x, const int y);

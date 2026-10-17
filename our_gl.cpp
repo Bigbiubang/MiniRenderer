@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <numbers>
 #include "our_gl.h"
 
 mat<4,4> ModelView, Viewport, Perspective; // "OpenGL" state matrices
@@ -19,8 +20,15 @@ void lookat(const vec3 eye, const vec3 center, const vec3 up) {
     ModelView = make_lookat(eye, center, up);
 }
 
-void init_perspective(const double f) {
-    Perspective = {{{1,0,0,0}, {0,1,0,0}, {0,0,1,0}, {0,0, -1/f,1}}};
+void init_perspective(const double camera_distance, const double fov_degrees, const double aspect,
+                      const double near_plane, const double far_plane) {
+    // lookat keeps the target at z=0 and the camera at z=camera_distance.
+    // Map camera-space depths near/far to NDC +1/-1; larger depth wins the z-test.
+    const double scale = 1./std::tan(fov_degrees*std::numbers::pi/360.);
+    const double depth_scale = (near_plane+far_plane)/(far_plane-near_plane);
+    Perspective = {{{scale/aspect,0,0,0}, {0,scale,0,0},
+                    {0,0,depth_scale,2*near_plane*far_plane/(far_plane-near_plane)-depth_scale*camera_distance},
+                    {0,0,-1,camera_distance}}};
 }
 
 void init_viewport(const int x, const int y, const int w, const int h) {
@@ -95,21 +103,33 @@ void rasterize(const Triangle &clip, const IShader &shader, RenderTarget &target
         {clip[0], {1, 0, 0}}, {clip[1], {0, 1, 0}}, {clip[2], {0, 0, 1}}
     };
     std::vector<ClipVertex> clipped;
-    for (int i=0; i<3; i++) {
-        const ClipVertex &a = polygon[i], &b = polygon[(i+1)%3];
-        bool inside_a = a.position.w >= min_w;
-        bool inside_b = b.position.w >= min_w;
-        if (inside_a) clipped.push_back(a);
-        if (inside_a != inside_b) {
-            double t = (min_w-a.position.w)/(b.position.w-a.position.w);
-            clipped.push_back({a.position + (b.position-a.position)*t,
-                               a.weights + (b.weights-a.weights)*t});
+    auto clip_against = [&](const auto &distance) {
+        clipped.clear();
+        for (size_t i=0; i<polygon.size(); i++) {
+            const ClipVertex &a = polygon[i], &b = polygon[(i+1)%polygon.size()];
+            const double da = distance(a.position), db = distance(b.position);
+            const bool inside_a = da >= 0, inside_b = db >= 0;
+            if (inside_a) clipped.push_back(a);
+            if (inside_a != inside_b) {
+                const double t = da/(da-db);
+                clipped.push_back({a.position + (b.position-a.position)*t,
+                                   a.weights + (b.weights-a.weights)*t});
+            }
         }
+        polygon.swap(clipped);
+    };
+    // Guard the perspective divide, then clip -w <= x,y,z <= w.
+    clip_against([](const vec4 &p) { return p.w-min_w; });
+    if (polygon.size() < 3) return;
+    for (int axis=0; axis<3; axis++) {
+        clip_against([axis](const vec4 &p) { return p.w+p[axis]; });
+        if (polygon.size() < 3) return;
+        clip_against([axis](const vec4 &p) { return p.w-p[axis]; });
+        if (polygon.size() < 3) return;
     }
-    if (clipped.size() < 3) return;
 
-    for (size_t i=1; i+1<clipped.size(); i++) {
-        const ClipVertex tri[3] = {clipped[0], clipped[i], clipped[i+1]};
+    for (size_t i=1; i+1<polygon.size(); i++) {
+        const ClipVertex tri[3] = {polygon[0], polygon[i], polygon[i+1]};
         vec4 ndc[3] = {tri[0].position/tri[0].position.w,
                        tri[1].position/tri[1].position.w,
                        tri[2].position/tri[2].position.w};

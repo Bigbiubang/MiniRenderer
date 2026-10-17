@@ -6,7 +6,7 @@ A C++20 CPU software rasterizer built while studying [TinyRenderer](https://gith
 
 ## Features
 
-- Triangle rasterization with depth testing, back-face culling, clipping against the camera's positive-w plane, and perspective-correct interpolation.
+- Triangle rasterization with depth testing, back-face culling, clipping against all six view-frustum planes, and perspective-correct interpolation.
 - Diffuse textures, tangent-space normal maps, and specular maps with Phong lighting.
 - Directional-light shadow mapping using a fitted orthographic light projection and 3×3 percentage-closer filtering.
 - Depth-sorted alpha blending for transparent fragments.
@@ -37,6 +37,14 @@ ctest --test-dir build --output-on-failure
 ```
 
 Run the executable from the repository root so it can find the textures next to the OBJ files. It writes `framebuffer.tga` and `ao.tga` in the current directory. The screenshots above were converted to PNG with `convert framebuffer.tga -auto-orient ...` and `convert ao.tga -auto-orient ...`; the orientation step is needed when displaying these TGA files through ImageMagick. The default is 1× sampling; use `--msaa 4` for 4× MSAA. Add `--timings` to print the time spent loading, rendering shadows, rendering the camera view, and computing SSAO plus writing images.
+
+The camera defaults to `--eye -1 0 2 --center 0 0 0 --up 0 1 0`, with a vertical field of view of about 48.2°, near and far planes at 0.1 and 100, and an 800×800 image. For example, to render a wider image from another viewpoint:
+
+```sh
+./build/tinyrenderer --size 960 540 --eye -2 1 3 --center 0 0 0 \
+  --fov 55 --near 0.1 --far 20 \
+  obj/diablo3_pose/diablo3_pose.obj obj/floor.obj
+```
 
 To render the head and its transparent eye layers:
 
@@ -70,7 +78,7 @@ The table shows the median of five Release runs of the Diablo scene at 800×800 
 
 The camera pass and SSAO run in parallel. Shadow-map rendering and asset loading are currently serial. The 4× mode uses more memory because it stores separate color, depth, and transparent fragments for each sample.
 
-The camera, directional light, 800×800 output size, and shadow-map size are currently fixed in `main.cpp`. The OBJ loader expects triangulated faces with position, UV, and normal indices. The shadow pass treats only fully opaque texels as occluders; SSAO uses the opaque depth buffer and is applied to the composited image. These are current limitations of the renderer.
+The directional light and shadow-map size are currently fixed in `main.cpp`. The OBJ loader expects triangulated faces with position, UV, and normal indices. The shadow pass treats only fully opaque texels as occluders; SSAO uses the opaque depth buffer and is applied to the composited image. These are current limitations of the renderer.
 
 ## Project origin
 

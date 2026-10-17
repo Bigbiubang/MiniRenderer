@@ -7,6 +7,75 @@ struct FlatShader : IShader {
     std::pair<bool, TGAColor> fragment(const vec3) const override { return {false, color}; }
 };
 
+bool test_projection_and_clipping() {
+    extern mat<4,4> Perspective;
+    init_perspective(2., 90., 1., .1, 10.);
+    const vec4 near_point = Perspective * vec4{0, 0, 1.9, 1};
+    const vec4 far_point = Perspective * vec4{0, 0, -8., 1};
+    if (std::abs(near_point.z/near_point.w-1.) > 1e-12 ||
+        std::abs(far_point.z/far_point.w+1.) > 1e-12) return false;
+    init_perspective(2., 90., 2., .1, 10.);
+    const vec4 wide_x = Perspective * vec4{1, 0, 0, 1};
+    const vec4 wide_y = Perspective * vec4{0, 1, 0, 1};
+    if (std::abs(wide_x.x/wide_x.w-.25) > 1e-12 ||
+        std::abs(wide_y.y/wide_y.w-.5) > 1e-12) return false;
+    init_perspective(2., 90., 1., .1, 10.);
+
+    constexpr int size = 32;
+    init_viewport(0, 0, size, size);
+    FlatShader white({255, 255, 255, 255});
+    const Triangle base = {{-.5, -.5, 0, 1}, {.5, -.5, 0, 1}, {0, .5, 0, 1}};
+    for (int axis=0; axis<3; axis++) {
+        for (double side : {-1., 1.}) {
+            Triangle partial = {base[0], base[1], base[2]};
+            Triangle outside = {base[0], base[1], base[2]};
+            if (axis == 2) {
+                partial[0].z = side*1.5;
+                for (vec4 &vertex : outside) vertex.z = side*1.5;
+            } else {
+                for (vec4 &vertex : partial) vertex[axis] += side*.8;
+                for (vec4 &vertex : outside) vertex[axis] += side*2.;
+            }
+            RenderTarget target(size, size, 1);
+            rasterize(partial, white, target, RenderPass::Opaque, 0, size);
+            int covered = 0;
+            for (double depth : target.depth) {
+                if (depth <= -999.) continue;
+                if (depth < -1.-1e-12 || depth > 1.+1e-12) return false;
+                covered++;
+            }
+            if (!covered) return false;
+            RenderTarget rejected(size, size, 1);
+            rasterize(outside, white, rejected, RenderPass::Opaque, 0, size);
+            for (double depth : rejected.depth) if (depth > -999.) return false;
+        }
+    }
+    Triangle across_near = {
+        Perspective * vec4{-.5, -.5, 0, 1},
+        Perspective * vec4{.5, -.5, 0, 1},
+        Perspective * vec4{0, .5, 1.95, 1}
+    };
+    RenderTarget near_target(size, size, 1);
+    rasterize(across_near, white, near_target, RenderPass::Opaque, 0, size);
+    int near_coverage = 0;
+    for (double depth : near_target.depth) {
+        if (depth <= -999.) continue;
+        if (depth < -1.-1e-12 || depth > 1.+1e-12) return false;
+        near_coverage++;
+    }
+    if (!near_coverage) return false;
+
+    Triangle behind_camera = {
+        Perspective * vec4{-.5, -.5, 2.5, 1},
+        Perspective * vec4{.5, -.5, 2.5, 1},
+        Perspective * vec4{0, .5, 2.5, 1}
+    };
+    RenderTarget rejected(size, size, 1);
+    rasterize(behind_camera, white, rejected, RenderPass::Opaque, 0, size);
+    for (double depth : rejected.depth) if (depth > -999.) return false;
+    return true;
+}
+
 TGAColor render_layers(bool near_first) {
     constexpr int size = 8;
     init_viewport(0, 0, size, size);
@@ -66,6 +135,10 @@ bool test_msaa_coverage() {
 }
 
 int main() {
+    if (!test_projection_and_clipping()) {
+        std::cerr << "Projection and all six clip planes must preserve visible fragments\n";
+        return 1;
+    }
     const TGAColor a = render_layers(true), b = render_layers(false);
     // Blue opaque, red translucent behind green translucent: expected BGRA.
     if (a[0] != 63 || a[1] != 128 || a[2] != 63 ||
