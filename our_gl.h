@@ -1,10 +1,14 @@
+#pragma once
+
 #include "tgaimage.h"
 #include "geometry.h"
 
+mat<4,4> make_lookat(const vec3 eye, const vec3 center, const vec3 up);
 void lookat(const vec3 eye, const vec3 center, const vec3 up);
-void init_perspective(const double f);
-void init_viewport(const int x, const int y, const int w, const int h);
-void init_zbuffer(const int width, const int height);
+void init_perspective (const double f);
+void init_viewport (const int x, const int y, const int w, const int h);
+void init_zbuffer (const int x, const int y);
+void init_sbuffer(const int x, const int y);
 
 struct IShader {
     static TGAColor sample2D(const TGAImage &img, const vec2 &uvf) {
@@ -14,5 +18,13 @@ struct IShader {
 };
 
 typedef vec4 Triangle[3]; // a triangle primitive is made of three ordered points
-void rasterize(const Triangle &clip, const IShader &shader, TGAImage &framebuffer);
-
+enum class RenderPass { Opaque, Transparent };
+struct TransparentFragment {
+    double z;
+    TGAColor color;
+};
+using TransparentBuffer = std::vector<std::vector<TransparentFragment>>;
+void rasterize(const Triangle &clip, const IShader &shader, TGAImage &framebuffer, RenderPass pass, TransparentBuffer &transparent);
+void rasterize_shadow(const Triangle &clip, const IShader &shader, const mat<4,4> &light_viewport,
+                      int width, int height, std::vector<double> &depth_buffer);
+void blend_transparency(TransparentBuffer &transparent, TGAImage &framebuffer);

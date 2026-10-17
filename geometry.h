@@ -1,187 +1,250 @@
 #pragma once
-#include <cmath>
-#include <cassert>
 #include <iostream>
+#include <cassert>
+#include <cmath>
 
 template<int n> struct vec {
     double data[n] = {0};
-    double& operator[](const int i)       { assert(i>=0 && i<n); return data[i]; }
-    double  operator[](const int i) const { assert(i>=0 && i<n); return data[i]; }
+    double& operator[](const int i)       {assert(i>=0 && i<n); return data[i];}
+    double  operator[](const int i) const {assert(i>=0 && i<n); return data[i];}
 };
 
-template<int n> double operator*(const vec<n>& lhs, const vec<n>& rhs) {
-    double ret = 0;                         // N.B. Do not ever, ever use such for loops! They are highly confusing.
-    for (int i=n; i--; ret+=lhs[i]*rhs[i]); // Here I used them as a tribute to old-school game programmers fighting for every CPU cycle.
-    return ret;                             // Once upon a time reverse loops were faster than the normal ones, it is not the case anymore.
-}
-
-template<int n> vec<n> operator+(const vec<n>& lhs, const vec<n>& rhs) {
-    vec<n> ret = lhs;
-    for (int i=n; i--; ret[i]+=rhs[i]);
-    return ret;
-}
-
-template<int n> vec<n> operator-(const vec<n>& lhs, const vec<n>& rhs) {
-    vec<n> ret = lhs;
-    for (int i=n; i--; ret[i]-=rhs[i]);
-    return ret;
-}
-
-template<int n> vec<n> operator*(const vec<n>& lhs, const double& rhs) {
-    vec<n> ret = lhs;
-    for (int i=n; i--; ret[i]*=rhs);
-    return ret;
-}
-
-template<int n> vec<n> operator*(const double& lhs, const vec<n> &rhs) {
-    return rhs * lhs;
-}
-
-template<int n> vec<n> operator/(const vec<n>& lhs, const double& rhs) {
-    vec<n> ret = lhs;
-    for (int i=n; i--; ret[i]/=rhs);
-    return ret;
-}
-
 template<int n> std::ostream& operator<<(std::ostream& out, const vec<n>& v) {
-    for (int i=0; i<n; i++) out << v[i] << " ";
+    for(int i=0;i<n;i++) out<<v[i]<<" ";
     return out;
-}
+};
 
 template<> struct vec<2> {
     double x = 0, y = 0;
-    double& operator[](const int i)       { assert(i>=0 && i<2); return i ? y : x; }
-    double  operator[](const int i) const { assert(i>=0 && i<2); return i ? y : x; }
+    double& operator[](const int i)       {assert(i>=0 && i<2); return i ? y : x;}
+    double  operator[](const int i) const {assert(i>=0 && i<2); return i ? y : x;}
 };
 
 template<> struct vec<3> {
     double x = 0, y = 0, z = 0;
-    double& operator[](const int i)       { assert(i>=0 && i<3); return i ? (1==i ? y : z) : x; }
-    double  operator[](const int i) const { assert(i>=0 && i<3); return i ? (1==i ? y : z) : x; }
+    double& operator[](const int i)       {assert(i>=0 && i<3); return i ? (1==i ? y : z) : x;}
+    double  operator[](const int i) const {assert(i>=0 && i<3); return i ? (1==i ? y : z) : x;}
 };
 
 template<> struct vec<4> {
     double x = 0, y = 0, z = 0, w = 0;
-    double& operator[](const int i)       { assert(i>=0 && i<4); return i<2 ? (i ? y : x) : (2==i ? z : w); }
-    double  operator[](const int i) const { assert(i>=0 && i<4); return i<2 ? (i ? y : x) : (2==i ? z : w); }
-    vec<2> xy()  const { return {x, y};    }
-    vec<3> xyz() const { return {x, y, z}; }
+    double& operator[](const int i)       {assert(i>=0 && i<4); return i ? (1==i ? y : i==2?z:w) : x;}
+    double  operator[](const int i) const {assert(i>=0 && i<4); return i ? (1==i ? y : i==2?z:w) : x;}
+    
+    vec<2> xy() const {
+        return {x, y};
+    }
+
+    vec<3> xyz() const {
+        return {x, y, z};
+    }
+
 };
 
 typedef vec<2> vec2;
 typedef vec<3> vec3;
 typedef vec<4> vec4;
 
-template<int n> double norm(const vec<n>& v) {
-    return std::sqrt(v*v);
+
+
+template<int n> vec<n> operator+(const vec<n>&a, const vec<n>&b) {
+    vec<n> c;
+    for(int i=0; i<n; i++) c[i] = a[i] + b[i];
+    return c;
+};
+
+template<int n> vec<n> operator/(const vec<n>&a, double num) {
+    vec<n> res;
+    for(int i=0; i<n; i++) res[i] = a[i] / num;
+    return res;
+}
+
+template<int n> vec<n> operator-(const vec<n>&a, const vec<n>&b) {
+    vec<n> c;
+    for(int i=0; i<n; i++) c[i] = a[i] - b[i];
+    return c;
+};
+
+template<int n> double operator*(const vec<n>&a, const vec<n>&b) {
+    double res=0;
+    for(int i=0; i<n; i++) res += a[i] * b[i];
+    return res;
+};
+
+template<int n> vec<n> operator*(const vec<n>&v, const double num) {
+    vec<n> res;
+    for(int i=0; i<n; i++) res[i] = v[i] * num;
+    return res;
+}
+
+template<int n> vec<n> operator*(const double num, const vec<n>&v) {
+    vec<n> res;
+    for(int i=0; i<n; i++) res[i] = v[i] * num;
+    return res;
+}
+
+template<int n> vec<n> hadamard(const vec<n>& a, const vec<n>& b) {
+    vec<n> res;
+    for(int i=0; i<n; i++) res[i] = a[i] * b[i];
+    return res;
 }
 
 template<int n> vec<n> normalized(const vec<n>& v) {
-    return v / norm(v);
+    vec<n> res;
+    double sum = 0;
+    for(int i=0; i<n; i++) sum += v[i] * v[i];
+    assert(sum > 1e-12);
+    sum = sqrt(sum);
+    for(int i=0; i<n; i++) res[i] = v[i] / sum;
+    return res;
 }
 
-inline vec3 cross(const vec3 &v1, const vec3 &v2) {
-    return {v1.y*v2.z - v1.z*v2.y, v1.z*v2.x - v1.x*v2.z, v1.x*v2.y - v1.y*v2.x};
+//计算向量长度
+template<int n> double norm(const vec<n>& v) {
+    double res=0;
+    for(int i=0; i<n; i++) res += pow(v[i], 2);
+    return sqrt(res);
 }
 
-template<int n> struct dt;
 
-template<int nrows,int ncols> struct mat {
-    vec<ncols> rows[nrows] = {{}};
+inline double cross(const vec<2>&a, const vec<2>&b) {
+    return a[0] * b[1] - a[1] * b[0];
+};
 
-          vec<ncols>& operator[] (const int idx)       { assert(idx>=0 && idx<nrows); return rows[idx]; }
-    const vec<ncols>& operator[] (const int idx) const { assert(idx>=0 && idx<nrows); return rows[idx]; }
+inline vec<3> cross(const vec<3>&a, const vec<3>&b) {
+    vec<3> res;
+    res[0] = a[1] * b[2] - a[2] * b[1];
+    res[1] = a[2] * b[0] - a[0] * b[2];
+    res[2] = a[0] * b[1] - a[1] * b[0];
+    return res;
+};
 
-    double det() const {
-        return dt<ncols>::det(*this);
+template<int row, int col> struct mat{
+    double data[row][col] = {0};
+    double* operator[](const int i) {assert(i>=0 && i<row); return data[i];};
+    const double* operator[](const int i) const {assert(i>=0 && i<row); return data[i];};
+
+    mat<col, row> transpose() const {
+        mat<col, row> result;
+        for (int i=0; i<row; i++)
+            for (int j=0; j<col; j++) result[j][i] = data[i][j];
+        return result;
     }
 
-    double cofactor(const int row, const int col) const {
-        mat<nrows-1,ncols-1> submatrix;
-        for (int i=nrows-1; i--; )
-            for (int j=ncols-1;j--; submatrix[i][j]=rows[i+int(i>=row)][j+int(j>=col)]);
-        return submatrix.det() * ((row+col)%2 ? -1 : 1);
-    }
-
-    mat<nrows,ncols> invert_transpose() const {
-        mat<nrows,ncols> adjugate_transpose; // transpose to ease determinant computation, check the last line
-        for (int i=nrows; i--; )
-            for (int j=ncols; j--; adjugate_transpose[i][j]=cofactor(i,j));
-        return adjugate_transpose/(adjugate_transpose[0]*rows[0]);
-    }
-
-    mat<nrows,ncols> invert() const {
+    mat<row, col> inverse() const {
+        static_assert(row == col, "Matrix must be square");
         return invert_transpose().transpose();
     }
 
-    mat<ncols,nrows> transpose() const {
-        mat<ncols,nrows> ret;
-        for (int i=ncols; i--; )
-            for (int j=nrows; j--; ret[i][j]=rows[j][i]);
-        return ret;
+    double det() const {
+        static_assert (row==3 && col==3, "det() currently only supports 3x3 matrices");
+        return
+            data[0][0] * (data[1][1] * data[2][2] - data[1][2] * data[2][1])
+          - data[0][1] * (data[1][0] * data[2][2] - data[1][2] * data[2][0])
+          + data[0][2] * (data[1][0] * data[2][1] - data[1][1] * data[2][0]);
     }
+
+    mat<row, col> invert_transpose() const {
+
+        static_assert(row == col, "Matrix must be square");
+
+        constexpr int N = row;
+
+        // 构造增广矩阵 [A | I]
+        double aug[N][2 * N] = {};
+
+        for (int i = 0; i < N; i++) {
+            for (int j = 0; j < N; j++) {
+                aug[i][j] = data[i][j];
+            }
+
+            aug[i][N + i] = 1.0;
+        }
+
+        // Gauss-Jordan 消元
+        for (int i = 0; i < N; i++) {
+
+            // 选择绝对值最大的主元
+            int pivot = i;
+
+            for (int r = i + 1; r < N; r++) {
+                if (std::abs(aug[r][i]) >
+                    std::abs(aug[pivot][i])) {
+                    pivot = r;
+                }
+            }
+
+            // 检查是否可逆
+            assert(std::abs(aug[pivot][i]) > 1e-12);
+
+            // 交换行
+            for (int j = 0; j < 2 * N; j++) {
+                std::swap(aug[i][j], aug[pivot][j]);
+            }
+
+            // 将主元归一化为 1
+            double div = aug[i][i];
+
+            for (int j = 0; j < 2 * N; j++) {
+                aug[i][j] /= div;
+            }
+
+            // 消去其他行第 i 列
+            for (int r = 0; r < N; r++) {
+
+                if (r == i) continue;
+
+                double factor = aug[r][i];
+
+                for (int j = 0; j < 2 * N; j++) {
+                    aug[r][j] -= factor * aug[i][j];
+                }
+            }
+        }
+
+        // 此时右半部分为 A^-1
+        // 转置后得到 A^-T
+        mat<row, col> result = {};
+
+        for (int i = 0; i < N; i++) {
+            for (int j = 0; j < N; j++) {
+                result[i][j] = aug[j][N + i];
+            }
+        }
+
+        return result;
+    }
+
 };
 
-template<int nrows,int ncols> vec<ncols> operator*(const vec<nrows>& lhs, const mat<nrows,ncols>& rhs) {
-    return (mat<1,nrows>{{lhs}}*rhs)[0];
-}
 
-template<int nrows,int ncols> vec<nrows> operator*(const mat<nrows,ncols>& lhs, const vec<ncols>& rhs) {
-    vec<nrows> ret;
-    for (int i=nrows; i--; ret[i]=lhs[i]*rhs);
-    return ret;
-}
 
-template<int R1,int C1,int C2>mat<R1,C2> operator*(const mat<R1,C1>& lhs, const mat<C1,C2>& rhs) {
-    mat<R1,C2> result;
-    for (int i=R1; i--; )
-        for (int j=C2; j--; )
-            for (int k=C1; k--; result[i][j]+=lhs[i][k]*rhs[k][j]);
-    return result;
-}
 
-template<int nrows,int ncols>mat<nrows,ncols> operator*(const mat<nrows,ncols>& lhs, const double& val) {
-    mat<nrows,ncols> result;
-    for (int i=nrows; i--; result[i] = lhs[i]*val);
-    return result;
-}
-
-template<int nrows,int ncols>mat<nrows,ncols> operator/(const mat<nrows,ncols>& lhs, const double& val) {
-    mat<nrows,ncols> result;
-    for (int i=nrows; i--; result[i] = lhs[i]/val);
-    return result;
-}
-
-template<int nrows,int ncols>mat<nrows,ncols> operator+(const mat<nrows,ncols>& lhs, const mat<nrows,ncols>& rhs) {
-    mat<nrows,ncols> result;
-    for (int i=nrows; i--; )
-        for (int j=ncols; j--; result[i][j]=lhs[i][j]+rhs[i][j]);
-    return result;
-}
-
-template<int nrows,int ncols>mat<nrows,ncols> operator-(const mat<nrows,ncols>& lhs, const mat<nrows,ncols>& rhs) {
-    mat<nrows,ncols> result;
-    for (int i=nrows; i--; )
-        for (int j=ncols; j--; result[i][j]=lhs[i][j]-rhs[i][j]);
-    return result;
-}
-
-template<int nrows,int ncols> std::ostream& operator<<(std::ostream& out, const mat<nrows,ncols>& m) {
-    for (int i=0; i<nrows; i++) out << m[i] << std::endl;
-    return out;
-}
-
-template<int n> struct dt { // template metaprogramming to compute the determinant recursively
-    static double det(const mat<n,n>& src) {
-        double ret = 0;
-        for (int i=n; i--; ret += src[0][i] * src.cofactor(0,i));
-        return ret;
+template<int row, int col> vec<row> operator*(const mat<row,col>& A, const vec<col>& v) {
+    vec<row> res;
+    for(int i=0; i<row; i++){
+        for(int j=0; j<col; j++) {
+            res[i] += A[i][j] * v[j];
+        }
     }
+    return res;
 };
 
-template<> struct dt<1> {   // template specialization to stop the recursion
-    static double det(const mat<1,1>& src) {
-        return src[0][0];
+template<int row1, int col1, int row2, int col2> mat<row1, col2> operator*(const mat<row1,col1>& A, const mat<row2, col2>& B) {
+    static_assert(col1 == row2);
+    
+    mat<row1, col2> res;
+
+    for(int i=0; i<row1; i++) {
+        for(int j=0; j<col2; j++) {
+
+            for(int t=0; t<col1; t++){
+                res[i][j] += A[i][t] * B[t][j];
+            }
+
+        }
     }
-};
+
+    return res;
+}
 

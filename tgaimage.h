@@ -46,4 +46,3 @@ private:
     std::uint8_t bpp = 0;
     std::vector<std::uint8_t> data = {};
 };
-
