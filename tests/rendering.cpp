@@ -1,8 +1,10 @@
 #include "our_gl.h"
 #include "scene.h"
+#include "scene_file.h"
 #include "ssao.h"
 #include "texture.h"
 #include <iostream>
+#include <sstream>
 
 struct FlatShader : IShader {
     TGAColor color;
@@ -44,6 +46,22 @@ bool test_model_transforms() {
     const vec4 normal = scaled.invert_transpose() * vec4{1, 1, 1, 0};
     const vec4 tangent = scaled * vec4{1, -1, 0, 0};
     return std::abs(normal*tangent) < 1e-12;
+}
+
+bool test_scene_file() {
+    std::istringstream input("# scene\nsize 640 480\nlight 0 1 0\n"
+                             "instance ../obj/sample.obj\ntranslate 2 3 4\n"
+                             "instance ../obj/sample.obj\nrotate 0 90 0\n");
+    SceneConfig config;
+    std::string error;
+    if (!parse_scene(input, "/tmp/scenes", config, error)) return false;
+    if (config.width != 640 || config.height != 480 || config.light.y != 1 ||
+        config.instances.size() != 2 || config.instances[0].translation.x != 2 ||
+        config.instances[1].translation.x != 0 || config.instances[1].rotation.y != 90 ||
+        config.instances[0].path != "/tmp/obj/sample.obj") return false;
+
+    std::istringstream bad("instance mesh.obj\nscale 1 2 3 extra\n");
+    return !parse_scene(bad, "/tmp", config, error) && error.find("line 2") != std::string::npos;
 }
 
 bool test_ambient_and_ssao() {
@@ -247,6 +265,10 @@ bool test_msaa_coverage() {
 }
 
 int main() {
+    if (!test_scene_file()) {
+        std::cerr << "Scene file parsing or relative paths are incorrect\n";
+        return 1;
+    }
     if (!test_model_transforms()) {
         std::cerr << "Instance transforms or transformed normals are incorrect\n";
         return 1;

@@ -1,0 +1,9 @@
+# Baseline Diablo scene, with the same settings as the original CLI example.
+size 800 800
+eye -1 0 2
+center 0 0 0
+up 0 1 0
+light 1 1 1
+
+instance ../obj/diablo3_pose/diablo3_pose.obj
+instance ../obj/floor.obj

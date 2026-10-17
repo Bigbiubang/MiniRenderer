@@ -1,6 +1,7 @@
 #include "our_gl.h"
 #include "model.h"
 #include "scene.h"
+#include "scene_file.h"
 #include "ssao.h"
 #include <algorithm>
 #include <chrono>
@@ -178,14 +179,14 @@ struct DrawCommand {
 };
 
 int main(int argc, char** argv) {
-    int msaa_samples = 1;
+    SceneConfig scene;
+    int &msaa_samples = scene.msaa_samples;
     bool timings = false;
-    TextureFilter texture_filter = TextureFilter::Trilinear;
-    int width = 800, height = 800;
-    vec3 eye{-1, 0, 2}, center{0, 0, 0}, up{0, 1, 0};
-    double fov = 2.*std::atan(1./norm(eye-center))*180./std::numbers::pi;
-    double near_plane = .1, far_plane = 100.;
-    std::vector<SceneInstance> instances;
+    TextureFilter &texture_filter = scene.texture_filter;
+    int &width = scene.width, &height = scene.height;
+    vec3 &eye = scene.eye, &center = scene.center, &up = scene.up, &light = scene.light;
+    double &fov = scene.fov, &near_plane = scene.near_plane, &far_plane = scene.far_plane;
+    std::vector<SceneInstance> &instances = scene.instances;
     auto parse_double = [&](int &i, double &value) {
         if (++i >= argc) return false;
         try {
@@ -215,16 +216,42 @@ int main(int argc, char** argv) {
     };
     auto usage = [&] {
         std::cerr << "Usage: " << argv[0]
-                  << " [--msaa 1|4] [--timings] [--size width height]"
+                  << " [--scene file] [--msaa 1|4] [--timings] [--size width height]"
                   << " [--eye x y z] [--center x y z] [--up x y z]"
+                  << " [--light x y z]"
                   << " [--fov degrees] [--near distance] [--far distance]"
                   << " [--texture-filter nearest|trilinear]"
-                  << " obj/model.obj [--translate x y z] [--rotate x y z] [--scale x y z]"
+                  << " [obj/model.obj [--translate x y z] [--rotate x y z] [--scale x y z]]"
                   << " [obj/other.obj [transforms] ...]\n";
     };
+    std::string scene_path;
     for (int i=1; i<argc; i++) {
         const std::string arg = argv[i];
-        if (arg == "--msaa") {
+        if (arg == "--help") {
+            usage();
+            return 0;
+        }
+        if (arg == "--scene") {
+            if (++i >= argc || !scene_path.empty()) {
+                std::cerr << "--scene expects exactly one file\n";
+                return 1;
+            }
+            scene_path = argv[i];
+        }
+    }
+    if (!scene_path.empty()) {
+        std::string error;
+        if (!load_scene_file(scene_path, scene, error)) {
+            std::cerr << error << '\n';
+            return 1;
+        }
+    }
+    const size_t file_instance_count = instances.size();
+    for (int i=1; i<argc; i++) {
+        const std::string arg = argv[i];
+        if (arg == "--scene") {
+            i++;
+        } else if (arg == "--msaa") {
             if (++i >= argc || (std::string(argv[i]) != "1" && std::string(argv[i]) != "4")) {
                 std::cerr << "--msaa expects 1 or 4\n";
                 return 1;
@@ -243,8 +270,9 @@ int main(int argc, char** argv) {
                 std::cerr << "--size expects width and height\n";
                 return 1;
             }
-        } else if (arg == "--eye" || arg == "--center" || arg == "--up") {
-            vec3 &value = arg == "--eye" ? eye : arg == "--center" ? center : up;
+        } else if (arg == "--eye" || arg == "--center" || arg == "--up" || arg == "--light") {
+            vec3 &value = arg == "--eye" ? eye : arg == "--center" ? center :
+                          arg == "--up" ? up : light;
             if (!parse_vec3(i, value)) {
                 std::cerr << arg << " expects three numbers\n";
                 return 1;
@@ -256,7 +284,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
         } else if (arg == "--translate" || arg == "--rotate" || arg == "--scale") {
-            if (instances.empty()) {
+            if (instances.size() <= file_instance_count) {
                 std::cerr << arg << " requires a preceding OBJ path\n";
                 return 1;
             }
@@ -283,8 +311,9 @@ int main(int argc, char** argv) {
     }
     if (width < 1 || height < 1 || width > 4096 || height > 4096 ||
         fov <= 0 || fov >= 180 || near_plane <= 0 || far_plane <= near_plane ||
-        norm(eye-center) < 1e-6 || norm(cross(up, eye-center)) < 1e-6) {
-        std::cerr << "Invalid camera or image settings\n";
+        norm(eye-center) < 1e-6 || norm(cross(up, eye-center)) < 1e-6 || norm(light) < 1e-6 ||
+        (msaa_samples != 1 && msaa_samples != 4)) {
+        std::cerr << "Invalid camera, light, or image settings\n";
         return 1;
     }
     for (SceneInstance &instance : instances) {
@@ -298,7 +327,6 @@ int main(int argc, char** argv) {
     using Clock = std::chrono::steady_clock;
     const auto start = Clock::now();
 
-    constexpr vec3  light{ 1, 1, 1}; // direction toward the light
     constexpr int shadow_width = 1024, shadow_height = 1024;
 
     std::vector<Model> models;
@@ -320,7 +348,8 @@ int main(int argc, char** argv) {
     const auto loaded = Clock::now();
 
     // Pass 1: fit an orthographic light projection around all model vertices.
-    LightView = make_lookat(center + normalized(light), center, {0, 1, 0});
+    const vec3 light_up = std::abs(normalized(light).y) > .99 ? vec3{0, 0, 1} : vec3{0, 1, 0};
+    LightView = make_lookat(center + normalized(light), center, light_up);
     LightProjection = fit_orthographic(models, instances, LightView);
     mat<4,4> light_viewport = {{{shadow_width/2.,0,0,shadow_width/2.},
                                {0,shadow_height/2.,0,shadow_height/2.},

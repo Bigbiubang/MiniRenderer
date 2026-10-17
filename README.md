@@ -11,6 +11,7 @@ A C++20 CPU software rasterizer built while studying [TinyRenderer](https://gith
 - Bilinear texture sampling and mipmaps with trilinear filtering based on perspective-correct UV derivatives.
 - Directional-light shadow mapping using a fitted orthographic light projection and 3×3 percentage-closer filtering.
 - Per-instance translation, rotation, and scale; repeated OBJ paths share one loaded mesh and texture set.
+- Scene files for repeatable camera, directional-light, and model-instance setups.
 - Depth-sorted alpha blending for transparent fragments.
 - Screen-space ambient occlusion (SSAO) with view-space sampling, depth-aware blur, and ambient-only lighting modulation.
 - Optional 4× MSAA with per-sample coverage, depth, and transparent blending. The camera pass bins triangles into horizontal bands that can render in parallel.
@@ -82,9 +83,20 @@ Place an OBJ path multiple times to create separate instances. `--translate`, `-
 
 ![Three instances of one Diablo mesh with shadows on a scaled floor](docs/images/instances.png)
 
+### Scene files
+
+The same two scenes are saved in [`scenes/single.scene`](scenes/single.scene) and [`scenes/instances.scene`](scenes/instances.scene). Run either one from any working directory; `instance` paths are resolved relative to the scene file, while `framebuffer.tga` and `ao.tga` are written to the current directory:
+
+```sh
+./build/tinyrenderer --scene scenes/single.scene
+./build/tinyrenderer --scene scenes/instances.scene
+```
+
+The format uses one setting per line. It supports `size width height`, `msaa 1|4`, `texture_filter nearest|trilinear`, `eye`, `center`, `up`, `light` (three numbers each), `fov`, `near`, and `far`. `light` points toward the directional light in world coordinates. Each `instance path` starts a model; following `translate`, `rotate`, and `scale` lines apply to that instance. Blank lines and lines beginning with `#` are ignored. Quote paths containing spaces. Command-line camera, light, image, and filtering options override values from the file; positional OBJ paths add more instances.
+
 ## Rendering pipeline
 
-1. Load triangle meshes and their `_diffuse.tga`, `_nm_tangent.tga`, and `_spec.tga` textures in [`model.cpp`](model.cpp), and generate mip levels in [`texture.cpp`](texture.cpp). [`scene.h`](scene.h) builds a Model matrix for each instance.
+1. Parse scene settings in [`scene_file.cpp`](scene_file.cpp), load triangle meshes and their `_diffuse.tga`, `_nm_tangent.tga`, and `_spec.tga` textures in [`model.cpp`](model.cpp), and generate mip levels in [`texture.cpp`](texture.cpp). [`scene.h`](scene.h) builds a Model matrix for each instance.
 2. Render opaque texels from the light's direction into a shadow depth buffer. The light projection fits the transformed world-space vertices of every instance.
 3. Bin triangles into screen bands and render opaque and transparent geometry from the camera with the Phong shader in [`main.cpp`](main.cpp). [`our_gl.cpp`](our_gl.cpp) handles clipping, per-sample rasterization, depth testing, transparency composition, and MSAA resolve.
 4. Reconstruct view-space positions and normals from resolved opaque depth, estimate and blur SSAO, then combine direct light with AO-modulated ambient light.
@@ -102,7 +114,7 @@ The table shows the median of five Release runs of the Diablo scene at 800×800 
 
 The camera pass and SSAO run in parallel. Shadow-map rendering and asset loading, including mipmap generation, are currently serial. The 4× mode uses more memory because it stores separate color, depth, and transparent fragments for each sample.
 
-The directional light, shadow-map size, and SSAO settings are currently fixed in `main.cpp`. The OBJ loader expects triangulated faces with position, UV, and normal indices. The shadow pass treats only fully opaque texels as occluders; SSAO also uses only opaque depth, so transparent layers do not occlude ambient light. These are current limitations of the renderer.
+The shadow-map size and SSAO settings are currently fixed in `main.cpp`. The OBJ loader expects triangulated faces with position, UV, and normal indices. The shadow pass treats only fully opaque texels as occluders; SSAO also uses only opaque depth, so transparent layers do not occlude ambient light. These are current limitations of the renderer.
 
 ## Project origin
 
