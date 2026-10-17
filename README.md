@@ -4,6 +4,10 @@ A C++20 CPU software rasterizer built while studying [TinyRenderer](https://gith
 
 ![Diablo model rendered by MiniRenderer](docs/images/diablo.png)
 
+[![Camera orbit animation — click to view the MP4](docs/images/orbit.gif)](docs/videos/orbit.mp4)
+
+Camera orbit rendered entirely on the CPU. [View the full 512×512, 30 fps video](docs/videos/orbit.mp4) · [Render your own](#camera-orbit-video).
+
 ## Features
 
 - Triangle rasterization with depth testing, back-face culling, clipping against all six view-frustum planes, and perspective-correct interpolation.
