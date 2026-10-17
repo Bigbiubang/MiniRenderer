@@ -1,9 +1,12 @@
 #include "our_gl.h"
 #include "model.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <random>
+#include <string>
 
 extern mat<4,4> ModelView, Perspective, Viewport, LightView, LightProjection;
 extern std::vector<double> zbuffer, sbuffer;
@@ -123,12 +126,23 @@ struct PhongShader : IShader {
         vec4 shadow_pos = shadow_matrix * world;
         double sx = shadow_pos.x / shadow_pos.w, sy = shadow_pos.y / shadow_pos.w;
         if (sx >= 0 && sx < shadow_width && sy >= 0 && sy < shadow_height) {
-            double shadow_depth = sbuffer[static_cast<int>(sx) + static_cast<int>(sy)*shadow_width];
-            // Larger z is closer to the light; the bias prevents self-shadowing.
-            if (shadow_pos.z / shadow_pos.w < shadow_depth - .005) {
-                diff = 0;
-                spec = 0;
+            constexpr double shadow_bias = .015;
+            const double receiver_depth = shadow_pos.z / shadow_pos.w;
+            const int center_x = static_cast<int>(sx), center_y = static_cast<int>(sy);
+            // Average neighboring shadow-map texels to soften hard, jagged edges.
+            int lit = 0, samples = 0;
+            for (int dy=-1; dy<=1; dy++) {
+                for (int dx=-1; dx<=1; dx++) {
+                    int x = center_x + dx, y = center_y + dy;
+                    if (x < 0 || x >= shadow_width || y < 0 || y >= shadow_height) continue;
+                    double shadow_depth = sbuffer[x + y*shadow_width];
+                    lit += receiver_depth >= shadow_depth - shadow_bias;
+                    samples++;
+                }
             }
+            double visibility = static_cast<double>(lit) / samples;
+            diff *= visibility;
+            spec *= visibility;
         }
 
         for (int channel : {0,1,2}) {
@@ -139,11 +153,35 @@ struct PhongShader : IShader {
     }
 };
 
+struct DrawCommand {
+    PhongShader shader;
+    Triangle clip;
+};
+
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " obj/model.obj" << std::endl;
+    int msaa_samples = 1;
+    bool timings = false;
+    std::vector<std::string> paths;
+    for (int i=1; i<argc; i++) {
+        if (std::string(argv[i]) == "--msaa") {
+            if (++i >= argc || (std::string(argv[i]) != "1" && std::string(argv[i]) != "4")) {
+                std::cerr << "--msaa expects 1 or 4\n";
+                return 1;
+            }
+            msaa_samples = argv[i][0]-'0';
+        } else if (std::string(argv[i]) == "--timings") {
+            timings = true;
+        } else {
+            paths.emplace_back(argv[i]);
+        }
+    }
+    if (paths.empty()) {
+        std::cerr << "Usage: " << argv[0] << " [--msaa 1|4] [--timings] obj/model.obj [obj/other.obj ...]" << std::endl;
         return 1;
     }
+
+    using Clock = std::chrono::steady_clock;
+    const auto start = Clock::now();
 
     constexpr int width  = 800;      // output image size
     constexpr int height = 800;
@@ -154,11 +192,16 @@ int main(int argc, char** argv) {
     constexpr int shadow_width = 1024, shadow_height = 1024;
 
     std::vector<Model> models;
-    models.reserve(argc-1);
-    for (int m=1; m<argc; m++) models.emplace_back(argv[m]);
+    models.reserve(paths.size());
+    for (const std::string &path : paths) models.emplace_back(path);
     int vertex_count = 0;
-    for (const Model &model : models) vertex_count += model.nverts();
+    int face_count = 0;
+    for (const Model &model : models) {
+        vertex_count += model.nverts();
+        face_count += model.nfaces();
+    }
     if (!vertex_count) return 1;
+    const auto loaded = Clock::now();
 
     // Pass 1: fit an orthographic light projection around all model vertices.
     LightView = make_lookat(center + normalized(light), center, up);
@@ -174,52 +217,100 @@ int main(int argc, char** argv) {
             rasterize_shadow(clip, shader, light_viewport, shadow_width, shadow_height, sbuffer);
         }
     }
+    const auto shadow_done = Clock::now();
 
     // Pass 2: render from the camera, testing each fragment against sbuffer.
     lookat(eye, center, up);                                   // build the ModelView   matrix
     init_perspective(norm(eye-center));                        // build the Perspective matrix
     init_viewport(width/16, height/16, width*7/8, height*7/8); // build the Viewport    matrix
-    init_zbuffer(width, height);
 
     TGAImage framebuffer(width, height, TGAImage::RGB);
+    RenderTarget target(width, height, msaa_samples);
+    std::vector<DrawCommand> commands;
+    commands.reserve(face_count);
+    for (const Model &model : models) {
+        PhongShader shader(light, model, eye, center, light_viewport, shadow_width, shadow_height);
+        for (int f=0; f<model.nfaces(); f++) {
+            Triangle clip = {shader.vertex(f, 0), shader.vertex(f, 1), shader.vertex(f, 2)};
+            commands.push_back({shader, {clip[0], clip[1], clip[2]}});
+        }
+    }
 
-    TransparentBuffer transparent(width*height);
+    // Bin triangles once, preserving draw order within each band.
+    constexpr int band_height = 64;
+    constexpr int band_count = (height+band_height-1)/band_height;
+    std::vector<std::vector<int>> band_commands(band_count);
+    for (size_t i=0; i<commands.size(); i++) {
+        double min_y = height, max_y = -1.;
+        bool crosses_camera = false;
+        for (const vec4 &vertex : commands[i].clip) {
+            if (vertex.w <= 1e-6) {
+                crosses_camera = true;
+                break;
+            }
+            double y = (Viewport * (vertex/vertex.w)).y;
+            min_y = std::min(min_y, y);
+            max_y = std::max(max_y, y);
+        }
+        if (crosses_camera) {
+            for (auto &band : band_commands) band.push_back(static_cast<int>(i));
+            continue;
+        }
+        if (max_y < -.25 || min_y > height-1+.25) continue;
+        int first = std::clamp(static_cast<int>(std::floor(std::max(0., min_y-.25)/band_height)), 0, band_count-1);
+        int last = std::clamp(static_cast<int>(std::floor(std::min<double>(height-1, max_y+.25)/band_height)), 0, band_count-1);
+        for (int band=first; band<=last; band++) band_commands[band].push_back(static_cast<int>(i));
+    }
 
-    for (RenderPass pass : {RenderPass::Opaque, RenderPass::Transparent}) {
-        for (const Model &model : models) {
-            PhongShader shader(light, model, eye, center, light_viewport, shadow_width, shadow_height);
-            for (int f=0; f<model.nfaces(); f++) {
-                Triangle clip = { shader.vertex(f, 0),
-                                  shader.vertex(f, 1),
-                                  shader.vertex(f, 2) };
-                rasterize(clip, shader, framebuffer, pass, transparent);
+    // Each horizontal band owns its samples, so triangles can run in parallel without depth-buffer locks.
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(dynamic)
+#endif
+    for (int band=0; band<band_count; band++) {
+        int y_begin = band*band_height, y_end = std::min(height, y_begin+band_height);
+        for (RenderPass pass : {RenderPass::Opaque, RenderPass::Transparent}) {
+            for (int index : band_commands[band]) {
+                const DrawCommand &command = commands[index];
+                rasterize(command.clip, command.shader, target, pass, y_begin, y_end);
             }
         }
     }
 
-    blend_transparency(transparent, framebuffer);
+    blend_transparency(target);
+    target.resolve(framebuffer, zbuffer);
+    const auto camera_done = Clock::now();
 
     // Screen-space ambient occlusion from the camera depth buffer.
     constexpr double ao_radius = .1;
     constexpr int ao_samples = 128;
-    const mat<4,4> inverse_viewport = Viewport.inverse();
+    const double ao_radius_x = Viewport[0][0]*ao_radius;
+    const double ao_radius_y = Viewport[1][1]*ao_radius;
     TGAImage ao_image(width, height, TGAImage::GRAYSCALE);
+#ifdef _OPENMP
     #pragma omp parallel for
+#endif
     for (int y=0; y<height; y++) {
         for (int x=0; x<width; x++) {
             const double z = zbuffer[x+y*width];
             if (z <= -999.) continue;
-            const vec4 fragment = inverse_viewport * vec4{static_cast<double>(x), static_cast<double>(y), z, 1.};
-            std::mt19937 rng(42u + static_cast<unsigned>(x+y*width));
-            std::uniform_real_distribution<double> offset(-ao_radius, ao_radius);
+            std::uint32_t seed = 42u + static_cast<std::uint32_t>(x+y*width);
+            seed ^= seed >> 16;
+            seed *= 0x7feb352du;
+            seed ^= seed >> 15;
+            seed *= 0x846ca68bu;
+            seed ^= seed >> 16;
+            std::minstd_rand rng(seed);
+            std::uniform_real_distribution<double> offset(-1., 1.);
             int occluded = 0, valid = 0;
             for (int i=0; i<ao_samples; i++) {
-                vec4 p = Viewport * (fragment + vec4{offset(rng), offset(rng), offset(rng), 0.});
-                if (p.x < 0 || p.x >= width || p.y < 0 || p.y >= height) continue;
-                const double d = zbuffer[static_cast<int>(p.x) + static_cast<int>(p.y)*width];
+                double px = x + ao_radius_x*offset(rng);
+                double py = y + ao_radius_y*offset(rng);
+                double pz = z + ao_radius*offset(rng);
+                if (px < 0 || px >= width || py < 0 || py >= height) continue;
+                const double d = zbuffer[static_cast<int>(px) + static_cast<int>(py)*width];
                 if (z + 5.*ao_radius < d) continue; // avoid halos at depth discontinuities
                 valid++;
-                occluded += d > p.z;
+                occluded += d > pz;
             }
             const double visibility = valid ? 1. - .4*occluded/valid : 1.;
             const double factor = visibility*visibility*(3. - 2.*visibility); // smoothstep(0, 1, visibility)
@@ -232,5 +323,12 @@ int main(int argc, char** argv) {
     }
     ao_image.write_tga_file("ao.tga");
     framebuffer.write_tga_file("framebuffer.tga");
+    if (timings) {
+        const auto finished = Clock::now();
+        auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b-a).count(); };
+        std::cerr << "load " << ms(start, loaded) << " ms, shadow " << ms(loaded, shadow_done)
+                  << " ms, camera " << ms(shadow_done, camera_done)
+                  << " ms, SSAO + write " << ms(camera_done, finished) << " ms\n";
+    }
     return 0;
 }

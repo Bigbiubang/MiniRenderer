@@ -24,7 +24,17 @@ struct TransparentFragment {
     TGAColor color;
 };
 using TransparentBuffer = std::vector<std::vector<TransparentFragment>>;
-void rasterize(const Triangle &clip, const IShader &shader, TGAImage &framebuffer, RenderPass pass, TransparentBuffer &transparent);
+struct RenderTarget {
+    int width, height, samples;
+    std::vector<double> depth;
+    std::vector<TGAColor> color;
+    TransparentBuffer transparent;
+
+    RenderTarget(int width, int height, int samples);
+    void resolve(TGAImage &framebuffer, std::vector<double> &pixel_depth) const;
+};
+void rasterize(const Triangle &clip, const IShader &shader, RenderTarget &target, RenderPass pass,
+               int y_begin, int y_end);
 void rasterize_shadow(const Triangle &clip, const IShader &shader, const mat<4,4> &light_viewport,
                       int width, int height, std::vector<double> &depth_buffer);
-void blend_transparency(TransparentBuffer &transparent, TGAImage &framebuffer);
+void blend_transparency(RenderTarget &target);

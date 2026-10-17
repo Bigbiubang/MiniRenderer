@@ -61,7 +61,31 @@ void rasterize_shadow(const Triangle &clip, const IShader &shader, const mat<4,4
     }
 }
 
-void rasterize(const Triangle &clip, const IShader &shader, TGAImage &framebuffer, RenderPass pass, TransparentBuffer &transparent) {
+RenderTarget::RenderTarget(int w, int h, int count)
+    : width(w), height(h), samples(count), depth(w*h*count, -1000.),
+      color(w*h*count, TGAColor{0, 0, 0, 255}), transparent(w*h*count) {}
+
+void RenderTarget::resolve(TGAImage &framebuffer, std::vector<double> &pixel_depth) const {
+    pixel_depth.assign(width*height, -1000.);
+    for (int y=0; y<height; y++) {
+        for (int x=0; x<width; x++) {
+            const int pixel = x+y*width;
+            TGAColor resolved = {0, 0, 0, 255};
+            for (int channel : {0,1,2}) {
+                int total = 0;
+                for (int sample=0; sample<samples; sample++)
+                    total += color[pixel*samples+sample][channel];
+                resolved[channel] = static_cast<std::uint8_t>((total+samples/2)/samples);
+            }
+            for (int sample=0; sample<samples; sample++)
+                pixel_depth[pixel] = std::max(pixel_depth[pixel], depth[pixel*samples+sample]);
+            framebuffer.set(x, y, resolved);
+        }
+    }
+}
+
+void rasterize(const Triangle &clip, const IShader &shader, RenderTarget &target, RenderPass pass,
+               int y_begin, int y_end) {
     struct ClipVertex {
         vec4 position;
         vec3 weights; // barycentric coordinates in the original triangle
@@ -91,56 +115,76 @@ void rasterize(const Triangle &clip, const IShader &shader, TGAImage &framebuffe
                        tri[2].position/tri[2].position.w};
         vec2 screen[3] = {(Viewport*ndc[0]).xy(), (Viewport*ndc[1]).xy(), (Viewport*ndc[2]).xy()};
 
+        auto [bbminx,bbmaxx] = std::minmax({screen[0].x, screen[1].x, screen[2].x});
+        auto [bbminy,bbmaxy] = std::minmax({screen[0].y, screen[1].y, screen[2].y});
+        const double extent = target.samples == 4 ? .25 : 0.;
+        if (bbmaxx+extent < 0 || bbmaxy+extent < y_begin ||
+            bbminx-extent >= target.width || bbminy-extent >= y_end) continue;
+
         mat<3,3> ABC = {{{screen[0].x, screen[0].y, 1.},
                          {screen[1].x, screen[1].y, 1.},
                          {screen[2].x, screen[2].y, 1.}}};
-        if (ABC.det() < 1) continue; // backface culling and subpixel triangles
+        double area = ABC.det();
+        if (area < (target.samples == 1 ? 1. : 1e-12)) continue; // back-face culling
         mat<3,3> barycentric = ABC.invert_transpose();
 
-        auto [bbminx,bbmaxx] = std::minmax({screen[0].x, screen[1].x, screen[2].x});
-        auto [bbminy,bbmaxy] = std::minmax({screen[0].y, screen[1].y, screen[2].y});
-        if (bbmaxx < 0 || bbmaxy < 0 || bbminx >= framebuffer.width() || bbminy >= framebuffer.height()) continue;
-#pragma omp parallel for
-        for (int x=static_cast<int>(std::max(0., std::ceil(bbminx)));
-             x<=static_cast<int>(std::min<double>(bbmaxx, framebuffer.width()-1)); x++) {
-            for (int y=static_cast<int>(std::max(0., std::ceil(bbminy)));
-                 y<=static_cast<int>(std::min<double>(bbmaxy, framebuffer.height()-1)); y++) {
-                vec3 bc = barycentric * vec3{static_cast<double>(x), static_cast<double>(y), 1.};
-                if (bc.x<0 || bc.y<0 || bc.z<0) continue;
-                double z = bc * vec3{ndc[0].z, ndc[1].z, ndc[2].z};
-                if (z <= zbuffer[x+y*framebuffer.width()]) continue;
-                vec3 corrected = {bc[0]/tri[0].position.w, bc[1]/tri[1].position.w, bc[2]/tri[2].position.w};
-                corrected = corrected / (corrected.x + corrected.y + corrected.z);
-                vec3 original = tri[0].weights*corrected[0] + tri[1].weights*corrected[1] + tri[2].weights*corrected[2];
-                auto [discard, color] = shader.fragment(original);
+        const int x0 = static_cast<int>(std::max(0., std::ceil(bbminx-extent)));
+        const int x1 = static_cast<int>(std::min<double>(target.width-1, std::floor(bbmaxx+extent)));
+        const int y0 = static_cast<int>(std::max<double>(y_begin, std::ceil(bbminy-extent)));
+        const int y1 = static_cast<int>(std::min<double>(y_end-1, std::floor(bbmaxy+extent)));
+        constexpr vec2 offsets[4] = {{-.25,-.25}, {.25,-.25}, {-.25,.25}, {.25,.25}};
+        for (int y=y0; y<=y1; y++) {
+            for (int x=x0; x<=x1; x++) {
+                bool visible[4] = {};
+                double depths[4] = {};
+                vec3 shade_bar = {};
+                int visible_count = 0;
+                for (int sample=0; sample<target.samples; sample++) {
+                    const vec2 offset = target.samples == 1 ? vec2{0,0} : offsets[sample];
+                    vec3 bc = barycentric * vec3{x+offset.x, y+offset.y, 1.};
+                    if (bc.x<0 || bc.y<0 || bc.z<0) continue;
+                    double z = bc * vec3{ndc[0].z, ndc[1].z, ndc[2].z};
+                    const int index = (x+y*target.width)*target.samples+sample;
+                    if (z <= target.depth[index]) continue;
+                    visible[sample] = true;
+                    depths[sample] = z;
+                    if (visible_count++ == 0) {
+                        vec3 corrected = {bc[0]/tri[0].position.w, bc[1]/tri[1].position.w, bc[2]/tri[2].position.w};
+                        corrected = corrected / (corrected.x + corrected.y + corrected.z);
+                        shade_bar = tri[0].weights*corrected[0] + tri[1].weights*corrected[1] + tri[2].weights*corrected[2];
+                    }
+                }
+                if (!visible_count) continue;
+                auto [discard, frag_color] = shader.fragment(shade_bar);
                 if (discard) continue;
-                if (pass == RenderPass::Opaque) {
-                    if (color[3] != 255) continue;
-                    zbuffer[x+y*framebuffer.width()] = z;
-                    framebuffer.set(x, y, color);
-                } else {
-                    if (color[3] == 0 || color[3] == 255) continue;
-                    transparent[x+y*framebuffer.width()].push_back({z, color});
+                if (pass == RenderPass::Opaque && frag_color[3] != 255) continue;
+                if (pass == RenderPass::Transparent && (frag_color[3] == 0 || frag_color[3] == 255)) continue;
+                for (int sample=0; sample<target.samples; sample++) {
+                    if (!visible[sample]) continue;
+                    const int index = (x+y*target.width)*target.samples+sample;
+                    if (pass == RenderPass::Opaque) {
+                        target.depth[index] = depths[sample];
+                        target.color[index] = frag_color;
+                    } else {
+                        target.transparent[index].push_back({depths[sample], frag_color});
+                    }
                 }
             }
         }
     }
 }
 
-void blend_transparency(TransparentBuffer &transparent, TGAImage &framebuffer) {
-    for (int y=0; y<framebuffer.height(); y++) {
-        for (int x=0; x<framebuffer.width(); x++) {
-            auto &fragments = transparent[x+y*framebuffer.width()];
-            if (fragments.empty()) continue;
-            std::sort(fragments.begin(), fragments.end(),
-                      [](const auto &a, const auto &b) { return a.z < b.z; });
-            TGAColor background = framebuffer.get(x, y);
-            for (const auto &fragment : fragments) {
-                int alpha = fragment.color[3];
-                for (int channel : {0,1,2})
-                    background[channel] = (fragment.color[channel]*alpha + background[channel]*(255-alpha)) / 255;
-            }
-            framebuffer.set(x, y, background);
+void blend_transparency(RenderTarget &target) {
+    for (size_t index=0; index<target.transparent.size(); index++) {
+        auto &fragments = target.transparent[index];
+        if (fragments.empty()) continue;
+        std::sort(fragments.begin(), fragments.end(),
+                  [](const auto &a, const auto &b) { return a.z < b.z; });
+        TGAColor &background = target.color[index];
+        for (const auto &fragment : fragments) {
+            int alpha = fragment.color[3];
+            for (int channel : {0,1,2})
+                background[channel] = (fragment.color[channel]*alpha + background[channel]*(255-alpha)) / 255;
         }
     }
 }
