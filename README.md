@@ -12,6 +12,7 @@ A C++20 CPU software rasterizer built while studying [TinyRenderer](https://gith
 - Directional-light shadow mapping using a fitted orthographic light projection and 3×3 percentage-closer filtering.
 - Per-instance translation, rotation, and scale; repeated OBJ paths share one loaded mesh and texture set.
 - Scene files for repeatable camera, directional-light, and model-instance setups.
+- Camera-orbit frame sequences for turntable videos, with mesh loading and shadow rendering reused across frames.
 - Depth-sorted alpha blending for transparent fragments.
 - Screen-space ambient occlusion (SSAO) with view-space sampling, depth-aware blur, and ambient-only lighting modulation.
 - Optional 4× MSAA with per-sample coverage, depth, and transparent blending. The camera pass bins triangles into horizontal bands that can render in parallel.
@@ -85,7 +86,7 @@ Place an OBJ path multiple times to create separate instances. `--translate`, `-
 
 ### Scene files
 
-The same two scenes are saved in [`scenes/single.scene`](scenes/single.scene) and [`scenes/instances.scene`](scenes/instances.scene). Run either one from any working directory; `instance` paths are resolved relative to the scene file, while `framebuffer.tga` and `ao.tga` are written to the current directory:
+The sample scenes are saved in [`scenes/single.scene`](scenes/single.scene), [`scenes/instances.scene`](scenes/instances.scene), and [`scenes/orbit.scene`](scenes/orbit.scene). Run them from any working directory; `instance` paths are resolved relative to the scene file, while output images are written to the current directory:
 
 ```sh
 ./build/tinyrenderer --scene scenes/single.scene
@@ -93,6 +94,20 @@ The same two scenes are saved in [`scenes/single.scene`](scenes/single.scene) an
 ```
 
 The format uses one setting per line. It supports `size width height`, `msaa 1|4`, `texture_filter nearest|trilinear`, `eye`, `center`, `up`, `light` (three numbers each), `fov`, `near`, and `far`. `light` points toward the directional light in world coordinates. Each `instance path` starts a model; following `translate`, `rotate`, and `scale` lines apply to that instance. Blank lines and lines beginning with `#` are ignored. Quote paths containing spaces. Command-line camera, light, image, and filtering options override values from the file; positional OBJ paths add more instances.
+
+### Camera-orbit video
+
+`--orbit N` renders N evenly spaced camera positions around the scene's `center`, starting from `eye`. The camera makes one full turn around the `up` axis without repeating the first frame at the end. Models, textures, and the directional shadow map are loaded or built once. The frame sequence is written to `--frames-dir` (`orbit_frames` by default); ordinary single-frame rendering still writes `framebuffer.tga` and `ao.tga`.
+
+```sh
+./build/tinyrenderer --scene scenes/orbit.scene \
+  --orbit 120 --frames-dir orbit_frames
+ffmpeg -framerate 30 -start_number 0 -i orbit_frames/frame_%04d.tga \
+  -frames:v 120 -c:v libx264 -pix_fmt yuv420p -crf 20 \
+  -movflags +faststart orbit.mp4
+```
+
+The second command requires FFmpeg and creates a four-second H.264 video at 30 fps. [Watch the rendered orbit video](docs/videos/orbit.mp4).
 
 ## Rendering pipeline
 

@@ -48,6 +48,15 @@ bool test_model_transforms() {
     return std::abs(normal*tangent) < 1e-12;
 }
 
+bool test_camera_orbit() {
+    const vec3 eye{0, 1, 2}, center{0, 1, 0}, up{0, 1, 0};
+    const vec3 quarter = orbit_eye(eye, center, up, std::numbers::pi/2.);
+    const vec3 full = orbit_eye(eye, center, up, 2.*std::numbers::pi);
+    return std::abs(quarter.x-2) < 1e-12 && std::abs(quarter.y-1) < 1e-12 &&
+           std::abs(quarter.z) < 1e-12 && norm(full-eye) < 1e-12 &&
+           std::abs(norm(quarter-center)-norm(eye-center)) < 1e-12;
+}
+
 bool test_scene_file() {
     std::istringstream input("# scene\nsize 640 480\nlight 0 1 0\n"
                              "instance ../obj/sample.obj\ntranslate 2 3 4\n"
@@ -265,6 +274,10 @@ bool test_msaa_coverage() {
 }
 
 int main() {
+    if (!test_camera_orbit()) {
+        std::cerr << "Camera orbit must preserve radius and close after one turn\n";
+        return 1;
+    }
     if (!test_scene_file()) {
         std::cerr << "Scene file parsing or relative paths are incorrect\n";
         return 1;

@@ -7,8 +7,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
+#include <iomanip>
 #include <limits>
 #include <numbers>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -182,6 +185,8 @@ int main(int argc, char** argv) {
     SceneConfig scene;
     int &msaa_samples = scene.msaa_samples;
     bool timings = false;
+    int orbit_frames = 0;
+    std::filesystem::path frames_dir = "orbit_frames";
     TextureFilter &texture_filter = scene.texture_filter;
     int &width = scene.width, &height = scene.height;
     vec3 &eye = scene.eye, &center = scene.center, &up = scene.up, &light = scene.light;
@@ -221,6 +226,7 @@ int main(int argc, char** argv) {
                   << " [--light x y z]"
                   << " [--fov degrees] [--near distance] [--far distance]"
                   << " [--texture-filter nearest|trilinear]"
+                  << " [--orbit frames] [--frames-dir directory]"
                   << " [obj/model.obj [--translate x y z] [--rotate x y z] [--scale x y z]]"
                   << " [obj/other.obj [transforms] ...]\n";
     };
@@ -259,6 +265,17 @@ int main(int argc, char** argv) {
             msaa_samples = argv[i][0]-'0';
         } else if (arg == "--timings") {
             timings = true;
+        } else if (arg == "--orbit") {
+            if (!parse_int(i, orbit_frames) || orbit_frames < 2 || orbit_frames > 3600) {
+                std::cerr << "--orbit expects 2 to 3600 frames\n";
+                return 1;
+            }
+        } else if (arg == "--frames-dir") {
+            if (++i >= argc || !*argv[i]) {
+                std::cerr << "--frames-dir expects a directory\n";
+                return 1;
+            }
+            frames_dir = argv[i];
         } else if (arg == "--texture-filter") {
             if (++i >= argc || (std::string(argv[i]) != "nearest" && std::string(argv[i]) != "trilinear")) {
                 std::cerr << "--texture-filter expects nearest or trilinear\n";
@@ -323,9 +340,17 @@ int main(int argc, char** argv) {
         }
         instance.model = make_model_matrix(instance);
     }
+    if (orbit_frames) {
+        std::error_code error;
+        std::filesystem::create_directories(frames_dir, error);
+        if (error || !std::filesystem::is_directory(frames_dir)) {
+            std::cerr << "Cannot create frames directory: " << frames_dir << '\n';
+            return 1;
+        }
+    }
 
     using Clock = std::chrono::steady_clock;
-    const auto start = Clock::now();
+    const auto load_start = Clock::now();
 
     constexpr int shadow_width = 1024, shadow_height = 1024;
 
@@ -365,107 +390,127 @@ int main(int argc, char** argv) {
     }
     const auto shadow_done = Clock::now();
 
-    // Pass 2: render from the camera, testing each fragment against sbuffer.
-    lookat(eye, center, up);                                   // build the ModelView   matrix
-    const int viewport_x = width/16, viewport_y = height/16;
-    const int viewport_width = width-2*viewport_x, viewport_height = height-2*viewport_y;
-    init_perspective(norm(eye-center), fov, static_cast<double>(viewport_width)/viewport_height,
-                     near_plane, far_plane);                    // build the Perspective matrix
-    init_viewport(viewport_x, viewport_y, viewport_width, viewport_height);
+    const vec3 initial_eye = eye;
+    const int frame_count = orbit_frames ? orbit_frames : 1;
+    double camera_ms = 0, output_ms = 0;
+    auto milliseconds = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b-a).count(); };
+    for (int frame=0; frame<frame_count; frame++) {
+        if (orbit_frames) eye = orbit_eye(initial_eye, center, up, 2.*std::numbers::pi*frame/frame_count);
+        const auto frame_start = Clock::now();
 
-    TGAImage framebuffer(width, height, TGAImage::RGB);
-    RenderTarget target(width, height, msaa_samples);
-    std::vector<DrawCommand> commands;
-    commands.reserve(face_count);
-    for (const SceneInstance &instance : instances) {
-        const Model &model = models[instance.mesh];
-        PhongShader shader(light, model, instance.model, eye, center,
-                           light_viewport, shadow_width, shadow_height, texture_filter);
-        for (int f=0; f<model.nfaces(); f++) {
-            Triangle clip = {shader.vertex(f, 0), shader.vertex(f, 1), shader.vertex(f, 2)};
-            commands.push_back({shader, {clip[0], clip[1], clip[2]}});
-        }
-    }
+        // Pass 2: render from the camera, testing each fragment against sbuffer.
+        lookat(eye, center, up);                                   // build the ModelView   matrix
+        const int viewport_x = width/16, viewport_y = height/16;
+        const int viewport_width = width-2*viewport_x, viewport_height = height-2*viewport_y;
+        init_perspective(norm(eye-center), fov, static_cast<double>(viewport_width)/viewport_height,
+                         near_plane, far_plane);                    // build the Perspective matrix
+        init_viewport(viewport_x, viewport_y, viewport_width, viewport_height);
 
-    // Bin triangles once, preserving draw order within each band.
-    constexpr int band_height = 64;
-    const int band_count = (height+band_height-1)/band_height;
-    std::vector<std::vector<int>> band_commands(band_count);
-    for (size_t i=0; i<commands.size(); i++) {
-        double min_y = height, max_y = -1.;
-        bool crosses_camera = false;
-        for (const vec4 &vertex : commands[i].clip) {
-            if (vertex.w <= 1e-6) {
-                crosses_camera = true;
-                break;
-            }
-            double y = (Viewport * (vertex/vertex.w)).y;
-            min_y = std::min(min_y, y);
-            max_y = std::max(max_y, y);
-        }
-        if (crosses_camera) {
-            for (auto &band : band_commands) band.push_back(static_cast<int>(i));
-            continue;
-        }
-        if (max_y < -.25 || min_y > height-1+.25) continue;
-        int first = std::clamp(static_cast<int>(std::floor(std::max(0., min_y-.25)/band_height)), 0, band_count-1);
-        int last = std::clamp(static_cast<int>(std::floor(std::min<double>(height-1, max_y+.25)/band_height)), 0, band_count-1);
-        for (int band=first; band<=last; band++) band_commands[band].push_back(static_cast<int>(i));
-    }
-
-    // Each horizontal band owns its samples, so triangles can run in parallel without depth-buffer locks.
-#ifdef _OPENMP
-    #pragma omp parallel for schedule(dynamic)
-#endif
-    for (int band=0; band<band_count; band++) {
-        int y_begin = band*band_height, y_end = std::min(height, y_begin+band_height);
-        for (RenderPass pass : {RenderPass::Opaque, RenderPass::Transparent}) {
-            for (int index : band_commands[band]) {
-                const DrawCommand &command = commands[index];
-                rasterize(command.clip, command.shader, target, pass, y_begin, y_end);
+        TGAImage framebuffer(width, height, TGAImage::RGB);
+        RenderTarget target(width, height, msaa_samples);
+        std::vector<DrawCommand> commands;
+        commands.reserve(face_count);
+        for (const SceneInstance &instance : instances) {
+            const Model &model = models[instance.mesh];
+            PhongShader shader(light, model, instance.model, eye, center,
+                               light_viewport, shadow_width, shadow_height, texture_filter);
+            for (int f=0; f<model.nfaces(); f++) {
+                Triangle clip = {shader.vertex(f, 0), shader.vertex(f, 1), shader.vertex(f, 2)};
+                commands.push_back({shader, {clip[0], clip[1], clip[2]}});
             }
         }
-    }
 
-    blend_transparency(target);
-    TGAImage ambient_image(width, height, TGAImage::RGB);
-    target.resolve(framebuffer, zbuffer, &ambient_image);
-    const auto camera_done = Clock::now();
-
-    // Estimate view-space occlusion from opaque depth, then modulate ambient light only.
-    constexpr double ao_radius = .4;
-    constexpr int ao_samples = 32;
-    const std::vector<double> visibility = compute_ssao(zbuffer, width, height, Perspective,
-                                                         Viewport, ao_radius, ao_samples);
-    TGAImage ao_image(width, height, TGAImage::GRAYSCALE);
-#ifdef _OPENMP
-    #pragma omp parallel for
-#endif
-    for (int y=0; y<height; y++) {
-        for (int x=0; x<width; x++) {
-            const int index = x+y*width;
-            const bool has_opaque_depth = zbuffer[index] > -999.;
-            const double factor = has_opaque_depth ? visibility[index] : 1.;
-            if (has_opaque_depth) {
-                const std::uint8_t gray = static_cast<std::uint8_t>(factor*255.);
-                ao_image.set(x, y, {gray, gray, gray, 255});
+        // Bin triangles once, preserving draw order within each band.
+        constexpr int band_height = 64;
+        const int band_count = (height+band_height-1)/band_height;
+        std::vector<std::vector<int>> band_commands(band_count);
+        for (size_t i=0; i<commands.size(); i++) {
+            double min_y = height, max_y = -1.;
+            bool crosses_camera = false;
+            for (const vec4 &vertex : commands[i].clip) {
+                if (vertex.w <= 1e-6) {
+                    crosses_camera = true;
+                    break;
+                }
+                double y = (Viewport * (vertex/vertex.w)).y;
+                min_y = std::min(min_y, y);
+                max_y = std::max(max_y, y);
             }
-            TGAColor color = framebuffer.get(x, y);
-            const TGAColor ambient = ambient_image.get(x, y);
-            for (int channel : {0,1,2})
-                color[channel] = static_cast<std::uint8_t>(std::min(255.,
-                    color[channel] + ambient[channel]*factor));
-            framebuffer.set(x, y, color);
+            if (crosses_camera) {
+                for (auto &band : band_commands) band.push_back(static_cast<int>(i));
+                continue;
+            }
+            if (max_y < -.25 || min_y > height-1+.25) continue;
+            int first = std::clamp(static_cast<int>(std::floor(std::max(0., min_y-.25)/band_height)), 0, band_count-1);
+            int last = std::clamp(static_cast<int>(std::floor(std::min<double>(height-1, max_y+.25)/band_height)), 0, band_count-1);
+            for (int band=first; band<=last; band++) band_commands[band].push_back(static_cast<int>(i));
         }
-    }
-    ao_image.write_tga_file("ao.tga");
-    framebuffer.write_tga_file("framebuffer.tga");
-    if (timings) {
+
+        // Each horizontal band owns its samples, so triangles can run in parallel without depth-buffer locks.
+    #ifdef _OPENMP
+        #pragma omp parallel for schedule(dynamic)
+    #endif
+        for (int band=0; band<band_count; band++) {
+            int y_begin = band*band_height, y_end = std::min(height, y_begin+band_height);
+            for (RenderPass pass : {RenderPass::Opaque, RenderPass::Transparent}) {
+                for (int index : band_commands[band]) {
+                    const DrawCommand &command = commands[index];
+                    rasterize(command.clip, command.shader, target, pass, y_begin, y_end);
+                }
+            }
+        }
+
+        blend_transparency(target);
+        TGAImage ambient_image(width, height, TGAImage::RGB);
+        target.resolve(framebuffer, zbuffer, &ambient_image);
+        const auto camera_done = Clock::now();
+
+        // Estimate view-space occlusion from opaque depth, then modulate ambient light only.
+        constexpr double ao_radius = .4;
+        constexpr int ao_samples = 32;
+        const std::vector<double> visibility = compute_ssao(zbuffer, width, height, Perspective,
+                                                             Viewport, ao_radius, ao_samples);
+        TGAImage ao_image;
+        if (!orbit_frames) ao_image = TGAImage(width, height, TGAImage::GRAYSCALE);
+    #ifdef _OPENMP
+        #pragma omp parallel for
+    #endif
+        for (int y=0; y<height; y++) {
+            for (int x=0; x<width; x++) {
+                const int index = x+y*width;
+                const bool has_opaque_depth = zbuffer[index] > -999.;
+                const double factor = has_opaque_depth ? visibility[index] : 1.;
+                if (!orbit_frames && has_opaque_depth) {
+                    const std::uint8_t gray = static_cast<std::uint8_t>(factor*255.);
+                    ao_image.set(x, y, {gray, gray, gray, 255});
+                }
+                TGAColor color = framebuffer.get(x, y);
+                const TGAColor ambient = ambient_image.get(x, y);
+                for (int channel : {0,1,2})
+                    color[channel] = static_cast<std::uint8_t>(std::min(255.,
+                        color[channel] + ambient[channel]*factor));
+                framebuffer.set(x, y, color);
+            }
+        }
+        if (orbit_frames) {
+            std::ostringstream name;
+            name << "frame_" << std::setw(4) << std::setfill('0') << frame << ".tga";
+            if (!framebuffer.write_tga_file((frames_dir/name.str()).string())) {
+                std::cerr << "Cannot write orbit frame " << frame << '\n';
+                return 1;
+            }
+        } else if (!ao_image.write_tga_file("ao.tga") || !framebuffer.write_tga_file("framebuffer.tga")) {
+            std::cerr << "Cannot write output images\n";
+            return 1;
+        }
         const auto finished = Clock::now();
-        auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b-a).count(); };
-        std::cerr << "load " << ms(start, loaded) << " ms, shadow " << ms(loaded, shadow_done)
-                  << " ms, camera " << ms(shadow_done, camera_done)
-                  << " ms, SSAO + write " << ms(camera_done, finished) << " ms\n";
+        camera_ms += milliseconds(frame_start, camera_done);
+        output_ms += milliseconds(camera_done, finished);
+    }
+    if (timings) {
+        std::cerr << "load " << milliseconds(load_start, loaded) << " ms, shadow "
+                  << milliseconds(loaded, shadow_done) << " ms, " << frame_count
+                  << " camera frames " << camera_ms << " ms, SSAO + write " << output_ms << " ms\n";
     }
     return 0;
 }

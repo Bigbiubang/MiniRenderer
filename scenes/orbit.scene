@@ -1,0 +1,10 @@
+# Camera distance leaves room for the complete model throughout the turn.
+size 512 512
+eye -1.4 0.3 3.2
+center 0 0 0
+up 0 1 0
+fov 50
+light 1 1 1
+
+instance ../obj/diablo3_pose/diablo3_pose.obj
+instance ../obj/floor.obj

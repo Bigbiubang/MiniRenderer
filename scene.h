@@ -27,3 +27,10 @@ inline mat<4,4> make_model_matrix(const SceneInstance &instance) {
                              {0,0,instance.scale.z,0}, {0,0,0,1}}};
     return translation * rotate_z * rotate_y * rotate_x * scale;
 }
+
+inline vec3 orbit_eye(const vec3 eye, const vec3 center, const vec3 up, const double angle) {
+    const vec3 axis = normalized(up);
+    const vec3 offset = eye-center;
+    return center + offset*std::cos(angle) + cross(axis, offset)*std::sin(angle) +
+           axis*(axis*offset)*(1.-std::cos(angle));
+}
