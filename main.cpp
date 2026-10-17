@@ -1,5 +1,6 @@
 #include "our_gl.h"
 #include "model.h"
+#include "scene.h"
 #include "ssao.h"
 #include <algorithm>
 #include <chrono>
@@ -8,16 +9,20 @@
 #include <limits>
 #include <numbers>
 #include <string>
+#include <unordered_map>
 
 extern mat<4,4> ModelView, Perspective, Viewport, LightView, LightProjection;
 extern std::vector<double> zbuffer, sbuffer;
 
-mat<4,4> fit_orthographic(const std::vector<Model> &models, const mat<4,4> &view) {
+mat<4,4> fit_orthographic(const std::vector<Model> &models,
+                          const std::vector<SceneInstance> &instances, const mat<4,4> &view) {
     double low[3] = {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
     double high[3] = {-low[0], -low[1], -low[2]};
-    for (const Model &model : models) {
+    for (const SceneInstance &instance : instances) {
+        const Model &model = models[instance.mesh];
+        const mat<4,4> light_model = view * instance.model;
         for (int i=0; i<model.nverts(); i++) {
-            vec4 p = view * model.vert(i);
+            vec4 p = light_model * model.vert(i);
             for (int axis=0; axis<3; axis++) {
                 low[axis] = std::min(low[axis], p[axis]);
                 high[axis] = std::max(high[axis], p[axis]);
@@ -39,8 +44,9 @@ struct BlankShader : IShader {
     const Model &model;
     mat<4,4> transform;
     TextureFilter filter;
-    BlankShader(const Model &m, const mat<4,4> &matrix, TextureFilter texture_filter)
-        : model(m), transform(matrix), filter(texture_filter) {}
+    BlankShader(const Model &m, const mat<4,4> &matrix, const mat<4,4> &model_matrix,
+                TextureFilter texture_filter)
+        : model(m), transform(matrix*model_matrix), filter(texture_filter) {}
     vec2 varying_uv[3];
 
     virtual vec4 vertex(const int face, const int vert) {
@@ -62,6 +68,7 @@ struct PhongShader : IShader {
     TextureFilter filter;
     vec4 l;              // light direction in eye coordinates
     mat<4,4> normal_matrix;
+    mat<4,4> object_to_world;
     vec2 varying_uv[3];  // triangle uv coordinates, written by the vertex shader, read by the fragment shader
     vec4 varying_nrm[3]; // vertex normals used when the model has no normal map
     vec3 eye;
@@ -72,9 +79,11 @@ struct PhongShader : IShader {
     mat<4,4> shadow_matrix; // world coordinates -> shadow-map pixels
     int shadow_width, shadow_height;
 
-    PhongShader(const vec3 light, const Model &m, const vec3 &eye_, const vec3 &center_,
+    PhongShader(const vec3 light, const Model &m, const mat<4,4> &model_matrix,
+                const vec3 &eye_, const vec3 &center_,
                 const mat<4,4> &light_viewport, int sw, int sh, TextureFilter texture_filter)
-        : model(m), filter(texture_filter), normal_matrix(ModelView.invert_transpose()), eye(eye_), center(center_),
+        : model(m), filter(texture_filter), normal_matrix((ModelView*model_matrix).invert_transpose()),
+          object_to_world(model_matrix), eye(eye_), center(center_),
           shadow_matrix(light_viewport * LightProjection * LightView), shadow_width(sw), shadow_height(sh) {
         l = normalized((ModelView*vec4{light.x, light.y, light.z, 0.})); // transform the light vector to view coordinates
         camera_pos = ModelView * vec4{eye.x, eye.y, eye.z, 1.};
@@ -84,7 +93,7 @@ struct PhongShader : IShader {
     virtual vec4 vertex(const int face, const int vert) {
         varying_uv[vert] = model.uv(face, vert);
         varying_nrm[vert] = normal_matrix * model.normal(face, vert);
-        varying_world[vert] = model.vert(face, vert);
+        varying_world[vert] = object_to_world * model.vert(face, vert);
         vec4 gl_Position = ModelView * varying_world[vert];
         tri[vert] = gl_Position;
         return Perspective * gl_Position;                         // in clip coordinates
@@ -176,7 +185,7 @@ int main(int argc, char** argv) {
     vec3 eye{-1, 0, 2}, center{0, 0, 0}, up{0, 1, 0};
     double fov = 2.*std::atan(1./norm(eye-center))*180./std::numbers::pi;
     double near_plane = .1, far_plane = 100.;
-    std::vector<std::string> paths;
+    std::vector<SceneInstance> instances;
     auto parse_double = [&](int &i, double &value) {
         if (++i >= argc) return false;
         try {
@@ -210,7 +219,8 @@ int main(int argc, char** argv) {
                   << " [--eye x y z] [--center x y z] [--up x y z]"
                   << " [--fov degrees] [--near distance] [--far distance]"
                   << " [--texture-filter nearest|trilinear]"
-                  << " obj/model.obj [obj/other.obj ...]\n";
+                  << " obj/model.obj [--translate x y z] [--rotate x y z] [--scale x y z]"
+                  << " [obj/other.obj [transforms] ...]\n";
     };
     for (int i=1; i<argc; i++) {
         const std::string arg = argv[i];
@@ -245,6 +255,17 @@ int main(int argc, char** argv) {
                 std::cerr << arg << " expects a number\n";
                 return 1;
             }
+        } else if (arg == "--translate" || arg == "--rotate" || arg == "--scale") {
+            if (instances.empty()) {
+                std::cerr << arg << " requires a preceding OBJ path\n";
+                return 1;
+            }
+            vec3 &value = arg == "--translate" ? instances.back().translation :
+                          arg == "--rotate" ? instances.back().rotation : instances.back().scale;
+            if (!parse_vec3(i, value)) {
+                std::cerr << arg << " expects three numbers\n";
+                return 1;
+            }
         } else if (arg == "--help") {
             usage();
             return 0;
@@ -253,10 +274,10 @@ int main(int argc, char** argv) {
             usage();
             return 1;
         } else {
-            paths.emplace_back(arg);
+            instances.push_back({.path = arg});
         }
     }
-    if (paths.empty()) {
+    if (instances.empty()) {
         usage();
         return 1;
     }
@@ -266,6 +287,13 @@ int main(int argc, char** argv) {
         std::cerr << "Invalid camera or image settings\n";
         return 1;
     }
+    for (SceneInstance &instance : instances) {
+        if (instance.scale.x <= 1e-6 || instance.scale.y <= 1e-6 || instance.scale.z <= 1e-6) {
+            std::cerr << "--scale components must be greater than 1e-6\n";
+            return 1;
+        }
+        instance.model = make_model_matrix(instance);
+    }
 
     using Clock = std::chrono::steady_clock;
     const auto start = Clock::now();
@@ -274,11 +302,17 @@ int main(int argc, char** argv) {
     constexpr int shadow_width = 1024, shadow_height = 1024;
 
     std::vector<Model> models;
-    models.reserve(paths.size());
-    for (const std::string &path : paths) models.emplace_back(path);
+    models.reserve(instances.size());
+    std::unordered_map<std::string, int> mesh_by_path;
+    for (SceneInstance &instance : instances) {
+        const auto [entry, inserted] = mesh_by_path.try_emplace(instance.path, static_cast<int>(models.size()));
+        if (inserted) models.emplace_back(instance.path);
+        instance.mesh = entry->second;
+    }
     int vertex_count = 0;
     int face_count = 0;
-    for (const Model &model : models) {
+    for (const SceneInstance &instance : instances) {
+        const Model &model = models[instance.mesh];
         vertex_count += model.nverts();
         face_count += model.nfaces();
     }
@@ -287,13 +321,14 @@ int main(int argc, char** argv) {
 
     // Pass 1: fit an orthographic light projection around all model vertices.
     LightView = make_lookat(center + normalized(light), center, {0, 1, 0});
-    LightProjection = fit_orthographic(models, LightView);
+    LightProjection = fit_orthographic(models, instances, LightView);
     mat<4,4> light_viewport = {{{shadow_width/2.,0,0,shadow_width/2.},
                                {0,shadow_height/2.,0,shadow_height/2.},
                                {0,0,1,0}, {0,0,0,1}}};
     init_sbuffer(shadow_width, shadow_height);
-    for (const Model &model : models) {
-        BlankShader shader(model, LightProjection * LightView, texture_filter);
+    for (const SceneInstance &instance : instances) {
+        const Model &model = models[instance.mesh];
+        BlankShader shader(model, LightProjection * LightView, instance.model, texture_filter);
         for (int f=0; f<model.nfaces(); f++) {
             Triangle clip = {shader.vertex(f, 0), shader.vertex(f, 1), shader.vertex(f, 2)};
             rasterize_shadow(clip, shader, light_viewport, shadow_width, shadow_height, sbuffer);
@@ -313,8 +348,10 @@ int main(int argc, char** argv) {
     RenderTarget target(width, height, msaa_samples);
     std::vector<DrawCommand> commands;
     commands.reserve(face_count);
-    for (const Model &model : models) {
-        PhongShader shader(light, model, eye, center, light_viewport, shadow_width, shadow_height, texture_filter);
+    for (const SceneInstance &instance : instances) {
+        const Model &model = models[instance.mesh];
+        PhongShader shader(light, model, instance.model, eye, center,
+                           light_viewport, shadow_width, shadow_height, texture_filter);
         for (int f=0; f<model.nfaces(); f++) {
             Triangle clip = {shader.vertex(f, 0), shader.vertex(f, 1), shader.vertex(f, 2)};
             commands.push_back({shader, {clip[0], clip[1], clip[2]}});

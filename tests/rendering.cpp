@@ -1,4 +1,5 @@
 #include "our_gl.h"
+#include "scene.h"
 #include "ssao.h"
 #include "texture.h"
 #include <iostream>
@@ -27,6 +28,23 @@ struct SplitShader : IShader {
         return {false, {0, 0, 100, 255}, {0, 80, 0, 255}};
     }
 };
+
+bool test_model_transforms() {
+    SceneInstance instance;
+    instance.translation = {3, 4, 5};
+    instance.rotation = {0, 0, 90};
+    instance.scale = {2, 3, 4};
+    const mat<4,4> model = make_model_matrix(instance);
+    const vec4 point = model * vec4{1, 2, 3, 1};
+    if (std::abs(point.x+3) > 1e-12 || std::abs(point.y-6) > 1e-12 ||
+        std::abs(point.z-17) > 1e-12 || std::abs(point.w-1) > 1e-12) return false;
+
+    instance.scale = {2, 1, 3};
+    const mat<4,4> scaled = make_model_matrix(instance);
+    const vec4 normal = scaled.invert_transpose() * vec4{1, 1, 1, 0};
+    const vec4 tangent = scaled * vec4{1, -1, 0, 0};
+    return std::abs(normal*tangent) < 1e-12;
+}
 
 bool test_ambient_and_ssao() {
     extern mat<4,4> Perspective, Viewport;
@@ -229,6 +247,10 @@ bool test_msaa_coverage() {
 }
 
 int main() {
+    if (!test_model_transforms()) {
+        std::cerr << "Instance transforms or transformed normals are incorrect\n";
+        return 1;
+    }
     if (!test_ambient_and_ssao()) {
         std::cerr << "SSAO must leave a flat surface clear and keep ambient separate\n";
         return 1;

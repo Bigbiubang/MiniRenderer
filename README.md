@@ -10,6 +10,7 @@ A C++20 CPU software rasterizer built while studying [TinyRenderer](https://gith
 - Diffuse textures, tangent-space normal maps, and specular maps with Phong lighting.
 - Bilinear texture sampling and mipmaps with trilinear filtering based on perspective-correct UV derivatives.
 - Directional-light shadow mapping using a fitted orthographic light projection and 3×3 percentage-closer filtering.
+- Per-instance translation, rotation, and scale; repeated OBJ paths share one loaded mesh and texture set.
 - Depth-sorted alpha blending for transparent fragments.
 - Screen-space ambient occlusion (SSAO) with view-space sampling, depth-aware blur, and ambient-only lighting modulation.
 - Optional 4× MSAA with per-sample coverage, depth, and transparent blending. The camera pass bins triangles into horizontal bands that can render in parallel.
@@ -67,10 +68,24 @@ To render the head and its transparent eye layers:
 
 ![Head and transparent eye layers rendered by MiniRenderer](docs/images/african-head.png)
 
+### Model instances
+
+Place an OBJ path multiple times to create separate instances. `--translate`, `--rotate`, and `--scale` apply to the preceding OBJ path; each takes X, Y, and Z values. Rotation uses degrees in X, Y, Z order. The transform is applied as scale, then rotation, then translation. Omitted transforms use the identity matrix, and scale components must be greater than 1e-6. For example:
+
+```sh
+./build/tinyrenderer --size 800 600 --eye -2 1 3.5 --center 0 -0.1 0 --fov 55 \
+  obj/diablo3_pose/diablo3_pose.obj --translate -1.1 -0.25 0 --rotate 0 25 0 --scale 0.75 0.75 0.75 \
+  obj/diablo3_pose/diablo3_pose.obj --translate 0 -0.25 0 --scale 0.75 0.75 0.75 \
+  obj/diablo3_pose/diablo3_pose.obj --translate 1.1 -0.25 0 --rotate 0 -25 0 --scale 0.75 0.75 0.75 \
+  obj/floor.obj --scale 2.5 1 2.5
+```
+
+![Three instances of one Diablo mesh with shadows on a scaled floor](docs/images/instances.png)
+
 ## Rendering pipeline
 
-1. Load triangle meshes and their `_diffuse.tga`, `_nm_tangent.tga`, and `_spec.tga` textures in [`model.cpp`](model.cpp), and generate mip levels in [`texture.cpp`](texture.cpp).
-2. Render opaque texels from the light's direction into a shadow depth buffer.
+1. Load triangle meshes and their `_diffuse.tga`, `_nm_tangent.tga`, and `_spec.tga` textures in [`model.cpp`](model.cpp), and generate mip levels in [`texture.cpp`](texture.cpp). [`scene.h`](scene.h) builds a Model matrix for each instance.
+2. Render opaque texels from the light's direction into a shadow depth buffer. The light projection fits the transformed world-space vertices of every instance.
 3. Bin triangles into screen bands and render opaque and transparent geometry from the camera with the Phong shader in [`main.cpp`](main.cpp). [`our_gl.cpp`](our_gl.cpp) handles clipping, per-sample rasterization, depth testing, transparency composition, and MSAA resolve.
 4. Reconstruct view-space positions and normals from resolved opaque depth, estimate and blur SSAO, then combine direct light with AO-modulated ambient light.
 
