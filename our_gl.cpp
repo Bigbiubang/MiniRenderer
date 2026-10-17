@@ -63,7 +63,7 @@ void rasterize_shadow(const Triangle &clip, const IShader &shader, const mat<4,4
             double z = bar * vec3{projected[0].z, projected[1].z, projected[2].z};
             double &depth = depth_buffer[x+y*width];
             if (z <= depth) continue;
-            auto [discard, color] = shader.fragment(bar);
+            auto [discard, color] = shader.fragment(bar, {}, {});
             if (!discard && color[3] == 255) depth = z;
         }
     }
@@ -147,6 +147,17 @@ void rasterize(const Triangle &clip, const IShader &shader, RenderTarget &target
         double area = ABC.det();
         if (area < (target.samples == 1 ? 1. : 1e-12)) continue; // back-face culling
         mat<3,3> barycentric = ABC.invert_transpose();
+        const vec3 reciprocal_w = {1./tri[0].position.w, 1./tri[1].position.w, 1./tri[2].position.w};
+        const vec3 bc_dx = barycentric * vec3{1, 0, 0};
+        const vec3 bc_dy = barycentric * vec3{0, 1, 0};
+        const double reciprocal_dx = bc_dx*reciprocal_w;
+        const double reciprocal_dy = bc_dy*reciprocal_w;
+        const vec3 numerator_dx = tri[0].weights*(bc_dx[0]*reciprocal_w[0]) +
+                                  tri[1].weights*(bc_dx[1]*reciprocal_w[1]) +
+                                  tri[2].weights*(bc_dx[2]*reciprocal_w[2]);
+        const vec3 numerator_dy = tri[0].weights*(bc_dy[0]*reciprocal_w[0]) +
+                                  tri[1].weights*(bc_dy[1]*reciprocal_w[1]) +
+                                  tri[2].weights*(bc_dy[2]*reciprocal_w[2]);
 
         const int x0 = static_cast<int>(std::max(0., std::ceil(bbminx-extent)));
         const int x1 = static_cast<int>(std::min<double>(target.width-1, std::floor(bbmaxx+extent)));
@@ -157,7 +168,7 @@ void rasterize(const Triangle &clip, const IShader &shader, RenderTarget &target
             for (int x=x0; x<=x1; x++) {
                 bool visible[4] = {};
                 double depths[4] = {};
-                vec3 shade_bar = {};
+                vec3 shade_bar = {}, shade_dx = {}, shade_dy = {};
                 int visible_count = 0;
                 for (int sample=0; sample<target.samples; sample++) {
                     const vec2 offset = target.samples == 1 ? vec2{0,0} : offsets[sample];
@@ -169,13 +180,17 @@ void rasterize(const Triangle &clip, const IShader &shader, RenderTarget &target
                     visible[sample] = true;
                     depths[sample] = z;
                     if (visible_count++ == 0) {
-                        vec3 corrected = {bc[0]/tri[0].position.w, bc[1]/tri[1].position.w, bc[2]/tri[2].position.w};
-                        corrected = corrected / (corrected.x + corrected.y + corrected.z);
-                        shade_bar = tri[0].weights*corrected[0] + tri[1].weights*corrected[1] + tri[2].weights*corrected[2];
+                        const vec3 corrected = {bc[0]*reciprocal_w[0], bc[1]*reciprocal_w[1],
+                                                bc[2]*reciprocal_w[2]};
+                        const double reciprocal = corrected.x + corrected.y + corrected.z;
+                        shade_bar = (tri[0].weights*corrected[0] + tri[1].weights*corrected[1] +
+                                     tri[2].weights*corrected[2]) / reciprocal;
+                        shade_dx = (numerator_dx-shade_bar*reciprocal_dx)/reciprocal;
+                        shade_dy = (numerator_dy-shade_bar*reciprocal_dy)/reciprocal;
                     }
                 }
                 if (!visible_count) continue;
-                auto [discard, frag_color] = shader.fragment(shade_bar);
+                auto [discard, frag_color] = shader.fragment(shade_bar, shade_dx, shade_dy);
                 if (discard) continue;
                 if (pass == RenderPass::Opaque && frag_color[3] != 255) continue;
                 if (pass == RenderPass::Transparent && (frag_color[3] == 0 || frag_color[3] == 255)) continue;

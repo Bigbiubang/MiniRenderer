@@ -38,7 +38,9 @@ mat<4,4> fit_orthographic(const std::vector<Model> &models, const mat<4,4> &view
 struct BlankShader : IShader {
     const Model &model;
     mat<4,4> transform;
-    BlankShader(const Model &m, const mat<4,4> &matrix): model(m), transform(matrix) {}
+    TextureFilter filter;
+    BlankShader(const Model &m, const mat<4,4> &matrix, TextureFilter texture_filter)
+        : model(m), transform(matrix), filter(texture_filter) {}
     vec2 varying_uv[3];
 
     virtual vec4 vertex(const int face, const int vert) {
@@ -46,16 +48,17 @@ struct BlankShader : IShader {
         return transform * model.vert(face, vert);
     }
 
-    virtual std::pair<bool, TGAColor> fragment(const vec3 bar) const {
+    virtual std::pair<bool, TGAColor> fragment(const vec3 bar, const vec3, const vec3) const {
         vec2 uv = varying_uv[0]*bar[0] + varying_uv[1]*bar[1] + varying_uv[2]*bar[2];
         // Only fully opaque texels cast shadows in this first version.
-        return {false, {255, 255, 255, static_cast<std::uint8_t>(model.diffuse(uv).w*255.)}};
+        return {false, {255, 255, 255, static_cast<std::uint8_t>(model.diffuse(uv, {}, {}, filter).w*255.)}};
     }
 };
 
 
 struct PhongShader : IShader {
     const Model &model;
+    TextureFilter filter;
     vec4 l;              // light direction in eye coordinates
     mat<4,4> normal_matrix;
     vec2 varying_uv[3];  // triangle uv coordinates, written by the vertex shader, read by the fragment shader
@@ -69,8 +72,8 @@ struct PhongShader : IShader {
     int shadow_width, shadow_height;
 
     PhongShader(const vec3 light, const Model &m, const vec3 &eye_, const vec3 &center_,
-                const mat<4,4> &light_viewport, int sw, int sh)
-        : model(m), normal_matrix(ModelView.invert_transpose()), eye(eye_), center(center_),
+                const mat<4,4> &light_viewport, int sw, int sh, TextureFilter texture_filter)
+        : model(m), filter(texture_filter), normal_matrix(ModelView.invert_transpose()), eye(eye_), center(center_),
           shadow_matrix(light_viewport * LightProjection * LightView), shadow_width(sw), shadow_height(sh) {
         l = normalized((ModelView*vec4{light.x, light.y, light.z, 0.})); // transform the light vector to view coordinates
         camera_pos = ModelView * vec4{eye.x, eye.y, eye.z, 1.};
@@ -86,9 +89,12 @@ struct PhongShader : IShader {
         return Perspective * gl_Position;                         // in clip coordinates
     }
 
-    virtual std::pair<bool,TGAColor> fragment(const vec3 bar) const {
+    virtual std::pair<bool,TGAColor> fragment(const vec3 bar, const vec3 dbar_dx,
+                                               const vec3 dbar_dy) const {
         TGAColor gl_FragColor = {255, 255, 255, 255};             // output color of the fragment
         vec2 uv = varying_uv[0] * bar[0] + varying_uv[1] * bar[1] + varying_uv[2] * bar[2];
+        vec2 uv_dx = varying_uv[0] * dbar_dx[0] + varying_uv[1] * dbar_dx[1] + varying_uv[2] * dbar_dx[2];
+        vec2 uv_dy = varying_uv[0] * dbar_dy[0] + varying_uv[1] * dbar_dy[1] + varying_uv[2] * dbar_dy[2];
         vec3 base_n = normalized((varying_nrm[0]*bar[0] + varying_nrm[1]*bar[1] + varying_nrm[2]*bar[2]).xyz());
         vec3 normal = base_n;
         if (model.has_normalmap()) {
@@ -103,7 +109,7 @@ struct PhongShader : IShader {
                     tangent = normalized(tangent);
                     vec3 b = cross(base_n, tangent);
                     if (b*bitangent < 0) b = b*-1.;
-                    vec3 map_n = model.normal(uv).xyz();
+                    vec3 map_n = model.normal(uv, uv_dx, uv_dy, filter).xyz();
                     normal = normalized(tangent*map_n.x + b*map_n.y + base_n*map_n.z);
                 }
             }
@@ -116,12 +122,12 @@ struct PhongShader : IShader {
         vec4 v = normalized(camera_pos - pos);
 
         double ambient = .4;                                      // ambient light intensity
-        vec4 basecolor = model.diffuse(uv);                        //归一化后的漫反射基础颜色
+        vec4 basecolor = model.diffuse(uv, uv_dx, uv_dy, filter);  //归一化后的漫反射基础颜色
 
         double diff = std::max(0., n * l);
 
         // diffuse light intensity
-        double spec = 2. * model.specular(uv) * std::pow(std::max(r * v, 0.), 35); // specular map controls highlight strength
+        double spec = 2. * model.specular(uv, uv_dx, uv_dy, filter) * std::pow(std::max(r * v, 0.), 35); // specular map controls highlight strength
 
         vec4 world = varying_world[0]*bar[0] + varying_world[1]*bar[1] + varying_world[2]*bar[2];
         vec4 shadow_pos = shadow_matrix * world;
@@ -162,6 +168,7 @@ struct DrawCommand {
 int main(int argc, char** argv) {
     int msaa_samples = 1;
     bool timings = false;
+    TextureFilter texture_filter = TextureFilter::Trilinear;
     int width = 800, height = 800;
     vec3 eye{-1, 0, 2}, center{0, 0, 0}, up{0, 1, 0};
     double fov = 2.*std::atan(1./norm(eye-center))*180./std::numbers::pi;
@@ -199,6 +206,7 @@ int main(int argc, char** argv) {
                   << " [--msaa 1|4] [--timings] [--size width height]"
                   << " [--eye x y z] [--center x y z] [--up x y z]"
                   << " [--fov degrees] [--near distance] [--far distance]"
+                  << " [--texture-filter nearest|trilinear]"
                   << " obj/model.obj [obj/other.obj ...]\n";
     };
     for (int i=1; i<argc; i++) {
@@ -211,6 +219,12 @@ int main(int argc, char** argv) {
             msaa_samples = argv[i][0]-'0';
         } else if (arg == "--timings") {
             timings = true;
+        } else if (arg == "--texture-filter") {
+            if (++i >= argc || (std::string(argv[i]) != "nearest" && std::string(argv[i]) != "trilinear")) {
+                std::cerr << "--texture-filter expects nearest or trilinear\n";
+                return 1;
+            }
+            texture_filter = std::string(argv[i]) == "nearest" ? TextureFilter::Nearest : TextureFilter::Trilinear;
         } else if (arg == "--size") {
             if (!parse_int(i, width) || !parse_int(i, height)) {
                 std::cerr << "--size expects width and height\n";
@@ -276,7 +290,7 @@ int main(int argc, char** argv) {
                                {0,0,1,0}, {0,0,0,1}}};
     init_sbuffer(shadow_width, shadow_height);
     for (const Model &model : models) {
-        BlankShader shader(model, LightProjection * LightView);
+        BlankShader shader(model, LightProjection * LightView, texture_filter);
         for (int f=0; f<model.nfaces(); f++) {
             Triangle clip = {shader.vertex(f, 0), shader.vertex(f, 1), shader.vertex(f, 2)};
             rasterize_shadow(clip, shader, light_viewport, shadow_width, shadow_height, sbuffer);
@@ -297,7 +311,7 @@ int main(int argc, char** argv) {
     std::vector<DrawCommand> commands;
     commands.reserve(face_count);
     for (const Model &model : models) {
-        PhongShader shader(light, model, eye, center, light_viewport, shadow_width, shadow_height);
+        PhongShader shader(light, model, eye, center, light_viewport, shadow_width, shadow_height, texture_filter);
         for (int f=0; f<model.nfaces(); f++) {
             Triangle clip = {shader.vertex(f, 0), shader.vertex(f, 1), shader.vertex(f, 2)};
             commands.push_back({shader, {clip[0], clip[1], clip[2]}});

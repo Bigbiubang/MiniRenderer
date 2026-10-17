@@ -8,6 +8,7 @@ A C++20 CPU software rasterizer built while studying [TinyRenderer](https://gith
 
 - Triangle rasterization with depth testing, back-face culling, clipping against all six view-frustum planes, and perspective-correct interpolation.
 - Diffuse textures, tangent-space normal maps, and specular maps with Phong lighting.
+- Bilinear texture sampling and mipmaps with trilinear filtering based on perspective-correct UV derivatives.
 - Directional-light shadow mapping using a fitted orthographic light projection and 3×3 percentage-closer filtering.
 - Depth-sorted alpha blending for transparent fragments.
 - Screen-space ambient occlusion (SSAO) sampled from the camera depth buffer.
@@ -25,6 +26,12 @@ The same silhouette at 2× display zoom, rendered with 1× and 4× coverage samp
 
 [View the full 4× render](docs/images/diablo-msaa4.png).
 
+Texture filtering on the distant checkerboard floor, shown at 2× display zoom:
+
+| Nearest | Trilinear mipmapping |
+| :---: | :---: |
+| ![Nearest texture sampling](docs/images/texture-nearest.png) | ![Trilinear texture sampling](docs/images/texture-trilinear.png) |
+
 ## Build and run
 
 You need a C++20 compiler and CMake 3.12 or newer. OpenMP is optional; CMake enables it when available.
@@ -36,7 +43,7 @@ ctest --test-dir build --output-on-failure
 ./build/tinyrenderer obj/diablo3_pose/diablo3_pose.obj obj/floor.obj
 ```
 
-Run the executable from the repository root so it can find the textures next to the OBJ files. It writes `framebuffer.tga` and `ao.tga` in the current directory. The screenshots above were converted to PNG with `convert framebuffer.tga -auto-orient ...` and `convert ao.tga -auto-orient ...`; the orientation step is needed when displaying these TGA files through ImageMagick. The default is 1× sampling; use `--msaa 4` for 4× MSAA. Add `--timings` to print the time spent loading, rendering shadows, rendering the camera view, and computing SSAO plus writing images.
+Run the executable from the repository root so it can find the textures next to the OBJ files. It writes `framebuffer.tga` and `ao.tga` in the current directory. The screenshots above were converted to PNG with `convert framebuffer.tga -auto-orient ...` and `convert ao.tga -auto-orient ...`; the orientation step is needed when displaying these TGA files through ImageMagick. The default is 1× sampling with trilinear texture filtering; use `--msaa 4` for 4× MSAA or `--texture-filter nearest` for a sampling comparison. Add `--timings` to print the time spent loading, rendering shadows, rendering the camera view, and computing SSAO plus writing images.
 
 The camera defaults to `--eye -1 0 2 --center 0 0 0 --up 0 1 0`, with a vertical field of view of about 48.2°, near and far planes at 0.1 and 100, and an 800×800 image. For example, to render a wider image from another viewpoint:
 
@@ -60,7 +67,7 @@ To render the head and its transparent eye layers:
 
 ## Rendering pipeline
 
-1. Load triangle meshes and their `_diffuse.tga`, `_nm_tangent.tga`, and `_spec.tga` textures in [`model.cpp`](model.cpp).
+1. Load triangle meshes and their `_diffuse.tga`, `_nm_tangent.tga`, and `_spec.tga` textures in [`model.cpp`](model.cpp), and generate mip levels in [`texture.cpp`](texture.cpp).
 2. Render opaque texels from the light's direction into a shadow depth buffer.
 3. Bin triangles into screen bands and render opaque and transparent geometry from the camera with the Phong shader in [`main.cpp`](main.cpp). [`our_gl.cpp`](our_gl.cpp) handles clipping, per-sample rasterization, depth testing, transparency composition, and MSAA resolve.
 4. Estimate SSAO from the resolved opaque depth buffer, multiply the result into the final image, and save both images.
@@ -71,12 +78,12 @@ The table shows the median of five Release runs of the Diablo scene at 800×800 
 
 | MSAA | Threads | Total | Camera pass | SSAO + output |
 | --- | ---: | ---: | ---: | ---: |
-| 1× | 1 | 605 ms | 53 ms | 491 ms |
-| 1× | 4 | 344 ms | 27 ms | 255 ms |
-| 4× | 1 | 639 ms | 84 ms | 494 ms |
-| 4× | 4 | 364 ms | 48 ms | 256 ms |
+| 1× | 1 | 650 ms | 110 ms | 386 ms |
+| 1× | 4 | 362 ms | 43 ms | 156 ms |
+| 4× | 1 | 710 ms | 149 ms | 390 ms |
+| 4× | 4 | 390 ms | 65 ms | 157 ms |
 
-The camera pass and SSAO run in parallel. Shadow-map rendering and asset loading are currently serial. The 4× mode uses more memory because it stores separate color, depth, and transparent fragments for each sample.
+The camera pass and SSAO run in parallel. Shadow-map rendering and asset loading, including mipmap generation, are currently serial. The 4× mode uses more memory because it stores separate color, depth, and transparent fragments for each sample.
 
 The directional light and shadow-map size are currently fixed in `main.cpp`. The OBJ loader expects triangulated faces with position, UV, and normal indices. The shadow pass treats only fully opaque texels as occluders; SSAO uses the opaque depth buffer and is applied to the composited image. These are current limitations of the renderer.
 

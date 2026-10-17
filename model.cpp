@@ -39,11 +39,11 @@ Model::Model(const std::string filename) {
         }
     }
     std::cerr << "# v# " << nverts() << " f# "  << nfaces() << std::endl;
-    auto load_texture = [&filename](const std::string suffix, TGAImage &img) {
+    auto load_texture = [&filename](const std::string suffix, Texture2D &texture) {
         size_t dot = filename.find_last_of(".");
         if (dot==std::string::npos) return;
         std::string texfile = filename.substr(0,dot) + suffix;
-        std::cerr << "texture file " << texfile << " loading " << (img.read_tga_file(texfile.c_str()) ? "ok" : "failed") << std::endl;
+        std::cerr << "texture file " << texfile << " loading " << (texture.load(texfile) ? "ok" : "failed") << std::endl;
     };
     // load_texture("_nm.tga", normalmap);
     load_texture("_nm_tangent.tga", normalmap);
@@ -68,30 +68,22 @@ vec4 Model::normal(const int iface, const int nthvert) const {
     return norms[facet_nrm[iface*3+nthvert]];
 }
 
-vec4 Model::normal(const vec2 &uv) const {
-    int x = std::clamp(static_cast<int>(uv[0]*normalmap.width()), 0, normalmap.width()-1);
-    int y = std::clamp(static_cast<int>(uv[1]*normalmap.height()), 0, normalmap.height()-1);
-    TGAColor c = normalmap.get(x, y);
-    return normalized(vec4{(double)c[2],(double)c[1],(double)c[0],0}*2./255. - vec4{1,1,1,0});
+vec4 Model::normal(const vec2 &uv, const vec2 &uv_dx, const vec2 &uv_dy, const TextureFilter filter) const {
+    const vec4 c = normalmap.sample(uv, uv_dx, uv_dy, filter);
+    const vec4 n = {2*c.x-1, 2*c.y-1, 2*c.z-1, 0};
+    return norm(n) > 1e-12 ? normalized(n) : vec4{0, 0, 1, 0};
 }
 
 bool Model::has_normalmap() const {
-    return normalmap.width() > 0 && normalmap.height() > 0;
+    return !normalmap.empty();
 }
 
-vec4 Model::diffuse(const vec2 &uv) const {
-    if (!diffusemap.width() || !diffusemap.height()) return {1, 1, 1, 1};
-    int x = std::clamp(static_cast<int>(uv[0]*diffusemap.width()), 0, diffusemap.width()-1);
-    int y = std::clamp(static_cast<int>(uv[1]*diffusemap.height()), 0, diffusemap.height()-1);
-    TGAColor c = diffusemap.get(x, y);
-    return vec4{(double)c[2], (double)c[1], (double)c[0], c.bytespp == 4 ? (double)c[3] : 255.} / 255.;
+vec4 Model::diffuse(const vec2 &uv, const vec2 &uv_dx, const vec2 &uv_dy, const TextureFilter filter) const {
+    return diffusemap.empty() ? vec4{1, 1, 1, 1} : diffusemap.sample(uv, uv_dx, uv_dy, filter);
 }
 
-double Model::specular(const vec2 &uv) const {
-    if (!specularmap.width() || !specularmap.height()) return 1.;
-    int x = std::clamp(static_cast<int>(uv[0]*specularmap.width()), 0, specularmap.width()-1);
-    int y = std::clamp(static_cast<int>(uv[1]*specularmap.height()), 0, specularmap.height()-1);
-    return specularmap.get(x, y)[0] / 255.;
+double Model::specular(const vec2 &uv, const vec2 &uv_dx, const vec2 &uv_dy, const TextureFilter filter) const {
+    return specularmap.empty() ? 1. : specularmap.sample(uv, uv_dx, uv_dy, filter).x;
 }
 
 vec2 Model::uv(const int iface, const int nthvert) const {

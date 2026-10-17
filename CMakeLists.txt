@@ -21,14 +21,14 @@ endif()
 
 find_package(OpenMP COMPONENTS CXX)
 
-set(SOURCES main.cpp  our_gl.cpp model.cpp tgaimage.cpp)
+set(SOURCES main.cpp our_gl.cpp model.cpp texture.cpp tgaimage.cpp)
 
 add_executable(${PROJECT_NAME} ${SOURCES})
 target_link_libraries(${PROJECT_NAME} PRIVATE $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>)
 
 include(CTest)
 if(BUILD_TESTING)
-  add_executable(rendering_test tests/rendering.cpp our_gl.cpp tgaimage.cpp)
+  add_executable(rendering_test tests/rendering.cpp our_gl.cpp texture.cpp tgaimage.cpp)
   target_include_directories(rendering_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(rendering_test PRIVATE $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>)
   add_test(NAME rendering COMMAND rendering_test)

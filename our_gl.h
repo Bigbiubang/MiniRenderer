@@ -15,7 +15,8 @@ struct IShader {
     static TGAColor sample2D(const TGAImage &img, const vec2 &uvf) {
         return img.get(uvf[0] * img.width(), uvf[1] * img.height());
     }
-    virtual std::pair<bool,TGAColor> fragment(const vec3 bar) const = 0;
+    virtual std::pair<bool,TGAColor> fragment(const vec3 bar, const vec3 dbar_dx,
+                                               const vec3 dbar_dy) const = 0;
 };
 
 typedef vec4 Triangle[3]; // a triangle primitive is made of three ordered points

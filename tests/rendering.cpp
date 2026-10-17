@@ -1,11 +1,68 @@
 #include "our_gl.h"
+#include "texture.h"
 #include <iostream>
 
 struct FlatShader : IShader {
     TGAColor color;
     explicit FlatShader(TGAColor value) : color(value) {}
-    std::pair<bool, TGAColor> fragment(const vec3) const override { return {false, color}; }
+    std::pair<bool, TGAColor> fragment(const vec3, const vec3, const vec3) const override { return {false, color}; }
 };
+
+struct TextureShader : IShader {
+    const Texture2D &texture;
+    explicit TextureShader(const Texture2D &value) : texture(value) {}
+    std::pair<bool, TGAColor> fragment(const vec3 bar, const vec3 dx, const vec3 dy) const override {
+        const vec2 uv{bar.y, bar.z};
+        const vec2 uv_dx{dx.y, dx.z}, uv_dy{dy.y, dy.z};
+        const auto gray = static_cast<std::uint8_t>(std::round(texture.sample(uv, uv_dx, uv_dy).x*255.));
+        return {false, {gray, gray, gray, 255}};
+    }
+};
+
+bool test_texture_filtering() {
+    TGAImage colors(2, 2, TGAImage::RGB);
+    colors.set(0, 0, {0, 0, 255, 255});
+    colors.set(1, 0, {0, 255, 0, 255});
+    colors.set(0, 1, {255, 0, 0, 255});
+    colors.set(1, 1, {255, 255, 255, 255});
+    Texture2D bilinear(colors);
+    const vec4 middle = bilinear.sample({.5, .5});
+    if (std::abs(middle.x-.5) > .01 || std::abs(middle.y-.5) > .01 ||
+        std::abs(middle.z-.5) > .01) return false;
+    const vec4 nearest = bilinear.sample({.5, .5}, {}, {}, TextureFilter::Nearest);
+    if (nearest.x != 1 || nearest.y != 1 || nearest.z != 1) return false;
+
+    TGAImage checker(4, 4, TGAImage::GRAYSCALE);
+    for (int y=0; y<4; y++)
+        for (int x=0; x<4; x++)
+            checker.set(x, y, {static_cast<std::uint8_t>((x+y)%2 ? 255 : 0), 0, 0, 0, 1});
+    Texture2D mipmap(checker);
+    if (mipmap.sample({.125, .125}).x != 0) return false;
+    if (std::abs(mipmap.sample({.125, .125}, {.5, 0}, {0, .5}).x-.5) > .01) return false;
+
+    TGAImage alpha(2, 1, TGAImage::RGBA);
+    alpha.set(0, 0, {0, 0, 255, 255});
+    alpha.set(1, 0, {255, 0, 0, 0});
+    const vec4 blend = Texture2D(alpha).sample({.5, .5});
+    if (std::abs(blend.x-1.) >= .01 || blend.y >= .01 || blend.z >= .01 ||
+        std::abs(blend.w-.5) >= .01) return false;
+
+    TGAImage dense(31, 31, TGAImage::GRAYSCALE);
+    for (int y=0; y<31; y++)
+        for (int x=0; x<31; x++)
+            dense.set(x, y, {static_cast<std::uint8_t>((x+y)%2 ? 255 : 0), 0, 0, 0, 1});
+    Texture2D minified(dense);
+    TextureShader shader(minified);
+    constexpr int size = 32;
+    init_viewport(0, 0, size, size);
+    Triangle triangle = {{-.5, -.5, 0, 1}, {.5, -.5, 0, 1}, {0, .5, 0, 1}};
+    RenderTarget target(size, size, 1);
+    TGAImage image(size, size, TGAImage::RGB);
+    rasterize(triangle, shader, target, RenderPass::Opaque, 0, size);
+    std::vector<double> depth;
+    target.resolve(image, depth);
+    return std::abs(static_cast<int>(image.get(16, 16)[0])-128) < 12;
+}
 
 bool test_projection_and_clipping() {
     extern mat<4,4> Perspective;
@@ -135,6 +192,10 @@ bool test_msaa_coverage() {
 }
 
 int main() {
+    if (!test_texture_filtering()) {
+        std::cerr << "Texture filtering must blend texels and choose mip levels\n";
+        return 1;
+    }
     if (!test_projection_and_clipping()) {
         std::cerr << "Projection and all six clip planes must preserve visible fragments\n";
         return 1;
